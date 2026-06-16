@@ -1,5 +1,37 @@
 # Layout algorithm notes — pickup-where-we-left-off
 
+## Session 6 (2026-06-16): live arc audit + renderer declutter (no layout change)
+
+Full audit of all 871 warp-edges across 155 areas, classified by what actually RENDERS
+(rebuilt fresh from current areas + layout.ts — not trusting older session numbers):
+- 694 curved arcs (550 purple correct-side + 144 red wrong-side), 152 vertical lines/stubs
+  (up/down — NOT arcs; intercepted before the arc branch), 25 self-loop marks.
+- Arc root-cause: perp 401 (58%, cycle sums off-axis), fold/red 144 (21%, non-Euclidean),
+  blocked 59, oneway 57, mismatch 33.
+- Worst by true arcs: astral 46 (7 z-layers, 20/21 perp cross-z — intrinsic 3D tangle),
+  sewer 26 (same-z tunnel loops + one-way chutes), dream 21 (18 red — surreal by design),
+  then newthalos/mirror2/under2/prison. ALL dominated by intentional non-Euclidean / maze /
+  3D, or layout-inherent same-z loops. Genuine reverse-dir area bugs are <a dozen, most of
+  the 33 "mismatch" are self-loop disorientation rooms or cone/spiral geometry.
+
+Conclusion (matches S4/S5): the perp bulk is NOT cleanly fixable in either direction — a
+global solver regresses (S4), a generalized sub-block embed got reverted for a data fix (S5).
+So do NOT chase a solver. Real levers = renderer declutter + targeted area data fixes.
+
+Shipped (renderer only — layout.ts untouched, data unchanged):
+1. Vertical WARP edges (z-stack: target bumped off the column) now render as a compact
+   ▲/▼ + target-name stub anchored on the source, instead of a long map-crossing diagonal to
+   an offset tile. Cleanly-stacked verticals keep the short axonometric line. (Map.tsx
+   vertical branch: `&& edge.style !== 'warp'` added to the both-visible case.)
+2. Self-loop edges render a compact ↻ glyph at the exit face instead of a dashed stick.
+NOTE: the live UI bundle is deployed separately from the data cron (regen-graph.sh only
+rsyncs public/data). A Map.tsx change needs a `npm run build` + bundle redeploy to show live.
+
+Deferred: constraint-solver generalization (lever 1 — Kit: "come back after the rest").
+Pending area data fixes (need a Kit shutdown): school — drop `up→3760 safe room` from the 24
+arena rooms, keep only Центр Арени 3734; + reverse-dir bug candidates (under2 16097/16106,
+catacomb 2033, arachnos 6324, solace 10277, pyramid 8749 — reverse slot free, Kit adjudicates).
+
 ## Session 5 (2026-06-16): Arcadia — data fix beat the code fix
 
 Arcadia's indoor fey-citadel court was interleaved with the outdoor meadow, and the four
