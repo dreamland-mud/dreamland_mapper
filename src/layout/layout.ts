@@ -370,10 +370,13 @@ function straightenVertical(ctx: Ctx, anchor: number): void {
  *
  * No-op (returns false) if the expected rooms are absent, so it can't corrupt another area.
  */
-function embedSubBlock(ctx: Ctx, BLOCK: Set<number>, minMembers: number, clearStep: [number, number]): boolean {
-  const members = [...BLOCK].filter((v) => ctx.byVnum.has(v));
-  if (members.length < minMembers) return false;  // sentinel — block not present
-  const inBlock = (v: number) => BLOCK.has(v) && ctx.byVnum.has(v);
+function embedSouthBlock(ctx: Ctx): boolean {
+  const SOUTH = new Set<number>();
+  for (let v = 3100; v <= 3143; v++) SOUTH.add(v);
+  [3047, 3051, 3068, 3069, 3070, 3255, 3256, 3270, 3271, 3272, 3273].forEach((v) => SOUTH.add(v));
+  const members = [...SOUTH].filter((v) => ctx.byVnum.has(v));
+  if (members.length < 20) return false;  // sentinel — not the midgaard we expect
+  const inBlock = (v: number) => SOUTH.has(v) && ctx.byVnum.has(v);
 
   // Internal cardinal edges (dedup undirected per axis).
   const edges: Array<{ u: number; v: number; dir: Direction }> = [];
@@ -539,7 +542,7 @@ function embedSubBlock(ctx: Ctx, BLOCK: Set<number>, minMembers: number, clearSt
   const worldOf = (u: number): [number, number] => [SCALE * lx.get(u)! + Tx, SCALE * ly.get(u)! + Ty];
   const collidesCity = () => members.some((u) => { const [wx, wy] = worldOf(u); return ctx.cells.has(cellKey(wx, wy, 0)); });
   let guard = 0;
-  while (collidesCity() && guard++ < 400) { Tx += clearStep[0] * SCALE; Ty += clearStep[1] * SCALE; }
+  while (collidesCity() && guard++ < 400) Ty -= SCALE;
 
   for (const u of members) {
     const [wx, wy] = worldOf(u);
@@ -549,63 +552,6 @@ function embedSubBlock(ctx: Ctx, BLOCK: Set<number>, minMembers: number, clearSt
     ctx.cells.set(cellKey(wx, wy, 0), u);
   }
   return true;
-}
-
-/** Midgaard southern district (Emerald/Park/Crowded) — constraint re-embed, shifted south. */
-function embedSouthBlock(ctx: Ctx): boolean {
-  const SOUTH = new Set<number>();
-  for (let v = 3100; v <= 3143; v++) SOUTH.add(v);
-  [3047, 3051, 3068, 3069, 3070, 3255, 3256, 3270, 3271, 3272, 3273].forEach((v) => SOUTH.add(v));
-  return embedSubBlock(ctx, SOUTH, 20, [0, -1]);
-}
-
-/**
- * Arcadia fey-citadel — the indoor castle/court (vnums 12100–12154, z=0 level) is a tangled
- * sub-region the trunk-first BFS interleaves with the outdoor meadow, exiling the self-looped
- * "Вечная <season>" rooms (12151–12154) far east as a stray cluster. Re-embed the z=0 court as
- * one clean rigid block — the one-way Холл→Вечная edges become row/column constraints that seat
- * each Вечная beside its Холл — shift it clear ABOVE the meadow, then re-anchor the watchtower /
- * basement stacks that hang off it by up/down exits so they follow the moved court.
- */
-function embedPalace(ctx: Ctx): boolean {
-  const CORE = new Set<number>();
-  for (let v = 12100; v <= 12154; v++) {
-    const p = ctx.placed.get(v);
-    if (p && p.z === 0) CORE.add(v);   // flat court only — towers/basements re-anchored after
-  }
-  if (!embedSubBlock(ctx, CORE, 25, [0, 1])) return false;  // +y clear = "higher than the meadow"
-  reanchorAppendages(ctx, CORE, 12100, 12155);
-  return true;
-}
-
-/** After a block is re-embedded (moved), re-anchor the rooms hanging off it within
- *  [loVnum,hiVnum] that weren't in the block (vertical tower/basement stacks + their same-z
- *  cardinal neighbours), so they follow the block instead of trailing long stubs to their old
- *  spots. BFS from the block over same-area edges, limited to that vnum window. */
-function reanchorAppendages(ctx: Ctx, core: Set<number>, loVnum: number, hiVnum: number): void {
-  const done = new Set<number>(core);
-  const queue = [...core];
-  while (queue.length) {
-    const v = queue.shift()!;
-    const sp = ctx.placed.get(v);
-    if (!sp) continue;
-    for (const e of ctx.byVnum.get(v)!.exits) {
-      const t = e.target;
-      if (done.has(t) || t < loVnum || t > hiVnum) continue;
-      const tp = ctx.placed.get(t);
-      if (!tp) continue;
-      const [dx, dy, dz] = DIR_DELTAS[e.dir];
-      let nx = sp.x + dx * MIN_LEN, ny = sp.y + dy * MIN_LEN, nz = sp.z;
-      if (dz !== 0) { nx = sp.x; ny = sp.y; nz = sp.z + dz; }
-      ctx.cells.delete(cellKey(tp.x, tp.y, tp.z));
-      const f = ctx.cells.has(cellKey(nx, ny, nz)) ? findFreeNear(ctx, nx, ny, nz) : { x: nx, y: ny };
-      const fx = f ? f.x : nx, fy = f ? f.y : ny;
-      tp.x = fx; tp.y = fy; tp.z = nz;
-      ctx.cells.set(cellKey(fx, fy, nz), t);
-      done.add(t);
-      queue.push(t);
-    }
-  }
 }
 
 export function computeLayout(
@@ -670,8 +616,6 @@ export function computeLayout(
     // straightenVertical(3103) + placeMidgaardSouth, which produced the wrong-side warps.
     embedSouthBlock(ctx);
   }
-
-  if (meta.file === 'arcadia') embedPalace(ctx);
 
   emitAllEdges(ctx, rooms);
 
