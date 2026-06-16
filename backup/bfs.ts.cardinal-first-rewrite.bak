@@ -1,0 +1,588 @@
+/**
+ * BFS layout, cardinal-first placement.
+ *
+ * Design goal: minimize warps. A warp is any edge whose endpoints aren't sitting at
+ * exactly SPACING in their cardinal direction. Lateral fallback (placing a room at a
+ * non-ideal cell so its connector becomes a warp) is forbidden — when the ideal cell
+ * is taken, we either cascade the occupant out of the way or refuse to place via this
+ * exit and try again later through a different parent.
+ *
+ * Pipeline:
+ *  1. Pick anchor (most-connected non-maze) and BFS each cluster.
+ *  2. For every visited exit: try to place target at parent.x + dir*SPACING. If taken,
+ *     try cascading the occupant's clean branch one SPACING away from us. On any failure,
+ *     leave target unplaced — some later parent might reach it.
+ *  3. Stragglers (rooms not placed by Pass 1 — the graph couldn't fit them cardinally)
+ *     get a lateral seat near an already-placed neighbour.
+ *  4. Edges are emitted last, with style derived from actual placement: at-spacing-in-dir
+ *     → open/door/random; anything else → warp.
+ *
+ * Side effects: every edge is exactly one of {open, door_*, random, cross_area, warp}.
+ * The total warp count equals the number of edges the room graph couldn't embed
+ * cardinally given the placement order (cycle edges, post-conflict edges).
+ */
+
+import type {
+  AreaLayout, AreaMeta, Exit, ExitStyle, PlacedExit, PlacedRoom, Room,
+} from '../types.js';
+import { DIR_DELTAS } from '../types.js';
+
+const SPACING = 3;
+const CLUSTER_GAP = 12;
+const DISPLACEMENT_RADIUS = 4;
+/** Cap on how big a cascade we'll attempt. Big branches are usually the trunk of the
+ *  area — sliding them rarely helps and burns time on slideBranch collision checks. */
+const MAX_CASCADE_BRANCH = 32;
+/** When the SPACING cell is taken, we try placing further along the same axis (still
+ *  cardinal, just longer connector) — but only if no other room sits on the path
+ *  between source and the proposed cell. A clean long connector is much better than
+ *  a warp; a long connector that crosses tiles becomes a warp anyway. */
+const MAX_AXIS_RETRIES = 5;
+
+interface Ctx {
+  meta: AreaMeta;
+  byVnum: Map<number, Room>;
+  vnumToArea: Record<number, string>;
+  placed: Map<number, PlacedRoom>;
+  cells: Map<string, number>;
+  emittedEdges: Set<string>;
+  exits: PlacedExit[];
+}
+
+const cellKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
+
+function isMazeRoom(room: Room): boolean {
+  if (room.exits.length < 4) return false;
+  const targets = new Set(room.exits.map((e) => e.target));
+  return targets.size === 1 && room.exits.length >= 4;
+}
+
+function classifyDoor(flags: string[]): ExitStyle | null {
+  if (!flags.includes('isdoor')) return null;
+  if (flags.includes('pickproof')) return 'door_pickproof';
+  if (flags.includes('locked')) return 'door_locked';
+  if (flags.includes('closed')) return 'door_closed';
+  return 'open';
+}
+
+function exitStyle(exit: Exit, isCrossArea: boolean): ExitStyle {
+  if (isCrossArea) return 'cross_area';
+  if (exit.flags.includes('random')) return 'random';
+  return classifyDoor(exit.flags) ?? 'open';
+}
+
+function isReciprocated(ctx: Ctx, fromVnum: number, targetVnum: number): boolean {
+  const targetRoom = ctx.byVnum.get(targetVnum);
+  if (!targetRoom) return false;
+  return targetRoom.exits.some((e) => e.target === fromVnum);
+}
+
+function emitEdge(ctx: Ctx, from: number, exit: Exit, style: ExitStyle, targetArea?: string) {
+  const a = Math.min(from, exit.target);
+  const b = Math.max(from, exit.target);
+  const axis = exit.dir.includes('north') || exit.dir.includes('south') ? 'ns'
+    : exit.dir.includes('east') || exit.dir.includes('west') ? 'ew'
+    : exit.dir === 'up' || exit.dir === 'down' ? 'ud' : 'd';
+  const key = `${a}-${b}-${axis}`;
+  if (ctx.emittedEdges.has(key)) return;
+  ctx.emittedEdges.add(key);
+  const placedExit: PlacedExit = {
+    from,
+    to: exit.target,
+    dir: exit.dir,
+    style,
+    flags: exit.flags,
+    hasFly: exit.flags.includes('fly') || exit.flags.includes('flying'),
+    hasSwim: exit.flags.includes('swim'),
+    hasTrap: exit.flags.some((f) => f.startsWith('trap')),
+    bidirectional: isReciprocated(ctx, from, exit.target),
+  };
+  if (targetArea) placedExit.targetArea = targetArea;
+  if (exit.keyword) placedExit.doorKeyword = exit.keyword;
+  ctx.exits.push(placedExit);
+}
+
+/** Find a free cell near (x, y, z) within radius. Returns null if none. */
+function findFreeCell(ctx: Ctx, x: number, y: number, z: number): { x: number; y: number; z: number } | null {
+  if (!ctx.cells.has(cellKey(x, y, z))) return { x, y, z };
+  for (let r = 1; r <= DISPLACEMENT_RADIUS; r++) {
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dy = -r; dy <= r; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const nx = x + dx, ny = y + dy;
+        if (!ctx.cells.has(cellKey(nx, ny, z))) return { x: nx, y: ny, z };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Collect a connected subgraph reachable from `seed` without crossing into `excluded`.
+ * Returns null if any branch room has a placed cardinal neighbour outside the subgraph
+ * (and not in `excluded`) — that's a "leaky" branch and sliding it would dislocate
+ * external alignments. Up/down exits are ignored (z is independent).
+ */
+function collectBranch(ctx: Ctx, seed: number, excluded: Set<number>): Set<number> | null {
+  const out = new Set<number>([seed]);
+  const stack = [seed];
+  while (stack.length > 0) {
+    const v = stack.pop()!;
+    const room = ctx.byVnum.get(v);
+    if (!room) continue;
+    for (const ex of room.exits) {
+      if (ex.dir === 'up' || ex.dir === 'down') continue;
+      if (excluded.has(ex.target)) continue;
+      if (out.has(ex.target)) continue;
+      if (!ctx.placed.has(ex.target)) continue;
+      out.add(ex.target);
+      stack.push(ex.target);
+    }
+  }
+  for (const v of out) {
+    const room = ctx.byVnum.get(v);
+    if (!room) continue;
+    for (const ex of room.exits) {
+      if (ex.dir === 'up' || ex.dir === 'down') continue;
+      if (out.has(ex.target)) continue;
+      if (excluded.has(ex.target)) continue;
+      if (ctx.placed.has(ex.target)) return null;
+    }
+  }
+  return out;
+}
+
+/**
+ * Translate every room in `branch` by (dx, dy). Aborts (returns false) if any new cell
+ * is occupied by a room outside the branch. Atomic on success: positions and the cell
+ * index are both updated; on failure no state changes.
+ */
+function slideBranch(ctx: Ctx, branch: Set<number>, dx: number, dy: number): boolean {
+  if (dx === 0 && dy === 0) return true;
+  const targets = new Map<number, { x: number; y: number; z: number }>();
+  for (const v of branch) {
+    const p = ctx.placed.get(v);
+    if (!p) return false;
+    targets.set(v, { x: p.x + dx, y: p.y + dy, z: p.z });
+  }
+  for (const [v, np] of targets) {
+    const occ = ctx.cells.get(cellKey(np.x, np.y, np.z));
+    if (occ !== undefined && occ !== v && !branch.has(occ)) return false;
+  }
+  for (const v of branch) {
+    const p = ctx.placed.get(v)!;
+    ctx.cells.delete(cellKey(p.x, p.y, p.z));
+  }
+  for (const v of branch) {
+    const p = ctx.placed.get(v)!;
+    const np = targets.get(v)!;
+    p.x = np.x; p.y = np.y;
+    ctx.cells.set(cellKey(np.x, np.y, np.z), v);
+  }
+  return true;
+}
+
+function place(ctx: Ctx, vnum: number, x: number, y: number, z: number, cluster: number, isVoid?: boolean, voidReason?: string) {
+  const placed: PlacedRoom = { vnum, x, y, z, cluster };
+  if (isVoid) {
+    placed.isVoid = true;
+    if (voidReason) placed.voidReason = voidReason;
+  }
+  ctx.placed.set(vnum, placed);
+  ctx.cells.set(cellKey(x, y, z), vnum);
+}
+
+/** Pick anchor for BFS: most-connected room, prefer non-maze. */
+function pickAnchor(rooms: Room[]): Room {
+  const candidates = rooms.filter((r) => !isMazeRoom(r));
+  const pool = candidates.length > 0 ? candidates : rooms;
+  return pool.reduce((best, r) => {
+    const score = r.exits.length;
+    const bestScore = best.exits.length;
+    if (score > bestScore) return r;
+    if (score === bestScore && r.vnum < best.vnum) return r;
+    return best;
+  }, pool[0]);
+}
+
+/**
+ * Walk the cells strictly between (sx, sy) and (tx, ty) on a cardinal axis at z. Returns
+ * true if any other room sits between them. Used to gate "longer cardinal" fallback —
+ * a long straight connector that crosses tiles becomes a visual mess; better to warp.
+ */
+function pathHasBlocker(ctx: Ctx, sx: number, sy: number, tx: number, ty: number, z: number): boolean {
+  if (sx !== tx && sy !== ty) return false;
+  if (sx === tx && sy === ty) return false;
+  const dx = Math.sign(tx - sx);
+  const dy = Math.sign(ty - sy);
+  let x = sx + dx, y = sy + dy;
+  while (x !== tx || y !== ty) {
+    if (ctx.cells.has(cellKey(x, y, z))) return true;
+    x += dx; y += dy;
+  }
+  return false;
+}
+
+/**
+ * Place `exit.target` somewhere. Strategy in priority order:
+ *  1. Ideal SPACING cell free → place there.
+ *  2. Cascade occupant's clean branch one SPACING further along our exit direction.
+ *  3. Walk further along the same axis (still cardinal, longer connector) as long as
+ *     the path stays unblocked.
+ *  4. Lateral fallback near the ideal cell — produces a warp-styled edge later, but
+ *     the room is still placed close to its parent and its other exits get a fair
+ *     chance at clean cardinal placement.
+ * Returns true iff *any* cell was found.
+ */
+function tryPlace(
+  ctx: Ctx, sourceVnum: number, exit: Exit, clusterIndex: number,
+): boolean {
+  const targetVnum = exit.target;
+  const targetRoom = ctx.byVnum.get(targetVnum);
+  if (!targetRoom) return false;
+  const source = ctx.placed.get(sourceVnum);
+  if (!source) return false;
+
+  const [dx, dy, dz] = DIR_DELTAS[exit.dir];
+  const idealX = source.x + dx * SPACING;
+  const idealY = source.y + dy * SPACING;
+  const idealZ = source.z + dz;
+  const idealKey = cellKey(idealX, idealY, idealZ);
+
+  const placeAt = (x: number, y: number, z: number) => {
+    const isMaze = isMazeRoom(targetRoom);
+    place(ctx, targetVnum, x, y, z, clusterIndex, isMaze, isMaze ? 'maze' : undefined);
+  };
+
+  if (!ctx.cells.has(idealKey)) {
+    placeAt(idealX, idealY, idealZ);
+    return true;
+  }
+
+  // For z-axis exits: try lateral on the same z+dz layer. Don't cascade or extend.
+  if (dz !== 0) {
+    const lateral = findFreeCell(ctx, idealX, idealY, idealZ);
+    if (lateral) { placeAt(lateral.x, lateral.y, lateral.z); return true; }
+    return false;
+  }
+
+  // Cascade.
+  const occupantVnum = ctx.cells.get(idealKey)!;
+  if (occupantVnum !== targetVnum) {
+    const branch = collectBranch(ctx, occupantVnum, new Set([sourceVnum]));
+    if (branch && branch.size <= MAX_CASCADE_BRANCH) {
+      if (slideBranch(ctx, branch, dx * SPACING, dy * SPACING)) {
+        if (!ctx.cells.has(idealKey)) { placeAt(idealX, idealY, idealZ); return true; }
+        slideBranch(ctx, branch, -dx * SPACING, -dy * SPACING);
+      }
+    }
+  }
+
+  // Long-but-clean cardinal: same axis, further out, no blocker between us and there.
+  for (let step = 2; step <= MAX_AXIS_RETRIES; step++) {
+    const tx = source.x + dx * SPACING * step;
+    const ty = source.y + dy * SPACING * step;
+    if (ctx.cells.has(cellKey(tx, ty, source.z))) continue;
+    if (pathHasBlocker(ctx, source.x, source.y, tx, ty, source.z)) continue;
+    placeAt(tx, ty, source.z);
+    return true;
+  }
+
+  // Lateral fallback — last resort. Edge will be warp, but room continues participating
+  // in BFS so its other exits get a fair shot at clean cardinal placement.
+  const lateral = findFreeCell(ctx, idealX, idealY, idealZ);
+  if (lateral) { placeAt(lateral.x, lateral.y, lateral.z); return true; }
+  return false;
+}
+
+/** Cardinal-only BFS within a single cluster. Returns vnums placed in this pass. */
+function bfsCluster(ctx: Ctx, anchor: Room, clusterIndex: number, originX: number): Set<number> {
+  const placedVnums = new Set<number>();
+  const queue: number[] = [];
+
+  const anchorIsMaze = isMazeRoom(anchor);
+  place(ctx, anchor.vnum, originX, 0, 0, clusterIndex, anchorIsMaze, anchorIsMaze ? 'maze' : undefined);
+  placedVnums.add(anchor.vnum);
+  queue.push(anchor.vnum);
+
+  while (queue.length > 0) {
+    const vnum = queue.shift()!;
+    const room = ctx.byVnum.get(vnum);
+    if (!room) continue;
+    const sourcePlaced = ctx.placed.get(vnum);
+    if (!sourcePlaced || sourcePlaced.isVoid) continue;
+
+    for (const exit of room.exits) {
+      const targetArea = ctx.vnumToArea[exit.target];
+      if (targetArea && targetArea !== ctx.meta.file) continue;
+      const targetRoom = ctx.byVnum.get(exit.target);
+      if (!targetRoom) continue;
+      if (ctx.placed.has(exit.target)) continue;
+
+      if (tryPlace(ctx, vnum, exit, clusterIndex)) {
+        placedVnums.add(exit.target);
+        if (!isMazeRoom(targetRoom)) queue.push(exit.target);
+      }
+      // On failure: leave target unplaced (no free cell anywhere in radius). Pass 2
+      // (placeStragglers) gives it a seat further out.
+    }
+  }
+  return placedVnums;
+}
+
+/**
+ * Pass 2: for rooms BFS couldn't place cardinally, find a lateral seat near a placed
+ * neighbour. These rooms' incoming edges will all become warps, but they still appear
+ * on the map close to where they belong topologically. Repeats until no progress so
+ * that newly-placed stragglers can themselves serve as anchors for further stragglers.
+ */
+function placeStragglers(ctx: Ctx, rooms: Room[], clusterIndex: number): void {
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const room of rooms) {
+      if (ctx.placed.has(room.vnum)) continue;
+      let chosen: { x: number; y: number; z: number } | null = null;
+      for (const exit of room.exits) {
+        const targetArea = ctx.vnumToArea[exit.target];
+        if (targetArea && targetArea !== ctx.meta.file) continue;
+        const target = ctx.placed.get(exit.target);
+        if (!target) continue;
+        const [dx, dy, dz] = DIR_DELTAS[exit.dir];
+        // Seed at parent + reverse(exit) — the position the room *would* occupy if
+        // it had been placed via this exit's reciprocal.
+        const seedX = target.x - dx * SPACING;
+        const seedY = target.y - dy * SPACING;
+        const seedZ = target.z - dz;
+        chosen = findFreeCell(ctx, seedX, seedY, seedZ);
+        if (chosen) break;
+      }
+      if (!chosen) continue;
+      const isMaze = isMazeRoom(room);
+      place(ctx, room.vnum, chosen.x, chosen.y, chosen.z, clusterIndex, isMaze, isMaze ? 'maze' : undefined);
+      progress = true;
+    }
+  }
+}
+
+/**
+ * Decide whether an edge should be cardinal-styled or warp based on geometry.
+ * Cardinal: same z, target at parent + dir*k*SPACING for some positive integer k,
+ * no other room on the connector path. Z-axis exits cardinal iff same xy and z+dz.
+ */
+function geometryIsCardinal(ctx: Ctx, source: PlacedRoom, target: PlacedRoom, exit: Exit): boolean {
+  const [dx, dy, dz] = DIR_DELTAS[exit.dir];
+  const ddx = target.x - source.x;
+  const ddy = target.y - source.y;
+  const ddz = target.z - source.z;
+  if (dz !== 0) return ddx === 0 && ddy === 0 && ddz === dz;
+  if (ddz !== 0) return false;
+  const onAxis = (dx !== 0 && ddy === 0 && Math.sign(ddx) === dx && ddx % SPACING === 0)
+              || (dy !== 0 && ddx === 0 && Math.sign(ddy) === dy && ddy % SPACING === 0);
+  if (!onAxis) return false;
+  return !pathHasBlocker(ctx, source.x, source.y, target.x, target.y, source.z);
+}
+
+/**
+ * Count how many real edges would render as warps given current placement. Used as
+ * a regression gate for the rectify pass — we only accept a slide that strictly
+ * reduces (or keeps equal) the warp total.
+ */
+function countWarps(ctx: Ctx, rooms: Room[]): number {
+  let count = 0;
+  for (const room of rooms) {
+    const source = ctx.placed.get(room.vnum);
+    if (!source) continue;
+    for (const exit of room.exits) {
+      const targetArea = ctx.vnumToArea[exit.target];
+      if (targetArea && targetArea !== ctx.meta.file) continue;
+      const target = ctx.placed.get(exit.target);
+      if (!target) continue;
+      // Dedupe via vnum-pair-and-axis (matches emitEdge).
+      const a = Math.min(room.vnum, exit.target);
+      const b = Math.max(room.vnum, exit.target);
+      if (a >= b) continue; // only count once per logical edge
+      if (room.vnum !== a) continue;
+      if (!geometryIsCardinal(ctx, source, target, exit)) count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Post-pass: every warp edge has endpoints that aren't axis-aligned at SPACING. For
+ * each, try to slide one endpoint's clean branch into alignment by exactly the offset.
+ * Branch must be small (≤ cap) and leak-free; the slide must not increase the global
+ * warp count. Only runs once — iteration tends to undo earlier alignment work.
+ */
+function rectifyWarps(ctx: Ctx, rooms: Room[]): void {
+  const MAX_BRANCH = 16;
+  const MAX_OFFSET = 8;
+
+  type Cand = { fromVnum: number; toVnum: number; exit: Exit; mag: number };
+  const cands: Cand[] = [];
+  for (const room of rooms) {
+    const source = ctx.placed.get(room.vnum);
+    if (!source) continue;
+    for (const exit of room.exits) {
+      const targetArea = ctx.vnumToArea[exit.target];
+      if (targetArea && targetArea !== ctx.meta.file) continue;
+      if (exit.dir === 'up' || exit.dir === 'down') continue;
+      const target = ctx.placed.get(exit.target);
+      if (!target || source.z !== target.z) continue;
+      if (geometryIsCardinal(ctx, source, target, exit)) continue;
+      const [dx, dy] = DIR_DELTAS[exit.dir];
+      const offsetX = dy !== 0 ? source.x - target.x : 0;
+      const offsetY = dx !== 0 ? source.y - target.y : 0;
+      const mag = Math.abs(offsetX) + Math.abs(offsetY);
+      if (mag === 0 || mag > MAX_OFFSET) continue;
+      cands.push({ fromVnum: room.vnum, toVnum: exit.target, exit, mag });
+    }
+  }
+  cands.sort((p, q) => p.mag - q.mag);
+
+  for (const c of cands) {
+    const source = ctx.placed.get(c.fromVnum);
+    const target = ctx.placed.get(c.toVnum);
+    if (!source || !target) continue;
+    if (geometryIsCardinal(ctx, source, target, c.exit)) continue; // already aligned
+    const [dx, dy] = DIR_DELTAS[c.exit.dir];
+    const offsetX = dy !== 0 ? source.x - target.x : 0;
+    const offsetY = dx !== 0 ? source.y - target.y : 0;
+    if (offsetX === 0 && offsetY === 0) continue;
+    if (Math.abs(offsetX) + Math.abs(offsetY) > MAX_OFFSET) continue;
+
+    const tBranch = collectBranch(ctx, c.toVnum, new Set([c.fromVnum]));
+    const sBranch = collectBranch(ctx, c.fromVnum, new Set([c.toVnum]));
+    type T = { branch: Set<number>; dx: number; dy: number };
+    const tries: T[] = [];
+    if (tBranch && tBranch.size <= MAX_BRANCH) tries.push({ branch: tBranch, dx: offsetX, dy: offsetY });
+    if (sBranch && sBranch.size <= MAX_BRANCH) tries.push({ branch: sBranch, dx: -offsetX, dy: -offsetY });
+    tries.sort((p, q) => p.branch.size - q.branch.size);
+
+    const warpsBefore = countWarps(ctx, rooms);
+    for (const t of tries) {
+      if (!slideBranch(ctx, t.branch, t.dx, t.dy)) continue;
+      const warpsAfter = countWarps(ctx, rooms);
+      if (warpsAfter < warpsBefore && geometryIsCardinal(ctx, source, target, c.exit)) break;
+      slideBranch(ctx, t.branch, -t.dx, -t.dy);
+    }
+  }
+}
+
+/**
+ * Pass 4: emit one edge per logical room↔room link. An edge is "cardinal" when source
+ * and target sit on the same cardinal axis in the exit's direction, at any positive
+ * multiple of SPACING, with no other room on the connector path. Anything else → warp.
+ */
+function emitAllEdges(ctx: Ctx, rooms: Room[]): void {
+  for (const room of rooms) {
+    const source = ctx.placed.get(room.vnum);
+    for (const exit of room.exits) {
+      const targetArea = ctx.vnumToArea[exit.target];
+      const isCrossArea = targetArea != null && targetArea !== ctx.meta.file;
+      if (isCrossArea) {
+        emitEdge(ctx, room.vnum, exit, 'cross_area', targetArea);
+        continue;
+      }
+      const targetRoom = ctx.byVnum.get(exit.target);
+      if (!targetRoom) {
+        emitEdge(ctx, room.vnum, exit, 'warp');
+        continue;
+      }
+      const target = ctx.placed.get(exit.target);
+      if (!source || !target) {
+        emitEdge(ctx, room.vnum, exit, 'warp');
+        continue;
+      }
+      const cardinal = geometryIsCardinal(ctx, source, target, exit);
+      const style: ExitStyle = cardinal ? exitStyle(exit, false) : 'warp';
+      emitEdge(ctx, room.vnum, exit, style);
+    }
+  }
+}
+
+export function computeLayout(
+  meta: AreaMeta,
+  rooms: Room[],
+  vnumToArea: Record<number, string>,
+): AreaLayout {
+  const byVnum = new Map<number, Room>();
+  for (const r of rooms) byVnum.set(r.vnum, r);
+
+  const ctx: Ctx = {
+    meta,
+    byVnum,
+    vnumToArea,
+    placed: new Map(),
+    cells: new Map(),
+    emittedEdges: new Set(),
+    exits: [],
+  };
+
+  // Pass 1: BFS each cluster, cardinal-only placement.
+  // Pass 2 (stragglers) runs after each cluster so newly-placed stragglers can
+  // serve as anchors for more stragglers within the same cluster.
+  const remaining = new Set(rooms.map((r) => r.vnum));
+  let cluster = 0;
+  let cursorX = 0;
+
+  while (remaining.size > 0) {
+    const candidates = rooms.filter((r) => remaining.has(r.vnum));
+    const anchor = pickAnchor(candidates);
+    bfsCluster(ctx, anchor, cluster, cursorX);
+    placeStragglers(ctx, candidates, cluster);
+
+    let maxX = cursorX;
+    for (const r of candidates) {
+      const p = ctx.placed.get(r.vnum);
+      if (p && p.x > maxX) maxX = p.x;
+      if (p) remaining.delete(r.vnum);
+    }
+    cursorX = maxX + CLUSTER_GAP;
+    cluster++;
+  }
+
+  // Pass 3: orphans (rooms with no exits at all, or wholly stranded). Place at cursor.
+  for (const r of rooms) {
+    if (ctx.placed.has(r.vnum)) continue;
+    const placement = findFreeCell(ctx, cursorX, 0, 0) ?? { x: cursorX, y: 0, z: 0 };
+    place(ctx, r.vnum, placement.x, placement.y, placement.z, cluster);
+    cursorX += 2;
+  }
+
+  // Rectify near-miss warps: where source and target are within MAX_OFFSET cells of
+  // axis alignment, try sliding one side's clean branch to align them. Slide is gated
+  // by a strict regression check on total warps.
+  rectifyWarps(ctx, rooms);
+
+  // Pass 4: emit edges.
+  emitAllEdges(ctx, rooms);
+
+  // Bounds + z-layers.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const zSet = new Set<number>();
+  for (const p of ctx.placed.values()) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+    zSet.add(p.z);
+  }
+  if (!Number.isFinite(minX)) { minX = maxX = minY = maxY = 0; }
+
+  const roomsRecord: Record<number, Room> = {};
+  for (const r of rooms) roomsRecord[r.vnum] = r;
+  const placedRecord: Record<number, PlacedRoom> = {};
+  for (const [v, p] of ctx.placed) placedRecord[v] = p;
+
+  return {
+    meta,
+    rooms: roomsRecord,
+    placed: placedRecord,
+    exits: ctx.exits,
+    zLayers: [...zSet].sort((a, b) => a - b),
+    bounds: { minX, maxX, minY, maxY },
+    clusters: cluster,
+  };
+}

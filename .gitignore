@@ -1,0 +1,9 @@
+node_modules/
+dist/
+public/data/
+*.log
+.DS_Store
+.vite/
+
+# stale generated-data snapshots from algorithm rewrites (NOTES.md + *.ts.bak kept)
+backup/data.*.bak/

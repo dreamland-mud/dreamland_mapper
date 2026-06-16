@@ -1,0 +1,1 @@
+{"root":["./src/i18n.ts","./src/main.tsx","./src/pathfinding.ts","./src/sectors.ts","./src/types.ts","./src/components/app.tsx","./src/components/asciimap.tsx","./src/components/map.tsx","./src/components/search.tsx","./src/components/sidepanel.tsx","./src/layout/layout.ts","./scripts/build-graph.ts","./tests/layout.test.ts"],"version":"5.9.3"}
