@@ -200,6 +200,22 @@ function main() {
       .map((f) => f.replace(/\.xml$/, ''));
   }
 
+  // Finished areas intentionally absent from area.lst.xml that should still be mapped
+  // (players can reach them, e.g. via a portal). Mirror the game's list + these extras;
+  // we deliberately do NOT map every on-disk file (that would pull in hidden stubs and
+  // instanced/disabled zones like donjon). Added only if present on disk.
+  const EXTRA_AREAS = ['area148.are']; // Orodruin / Mount Doom (vnum 35000-35099)
+  for (const extra of EXTRA_AREAS) {
+    const stem = extra.replace(/\.are$/, '');
+    if (
+      fs.existsSync(path.join(AREAS_DIR, `${stem}.are.xml`)) &&
+      !areaFiles.includes(extra) &&
+      !areaFiles.includes(stem)
+    ) {
+      areaFiles.push(extra);
+    }
+  }
+
   console.log(`Parsing ${areaFiles.length} areas from ${AREAS_DIR}…`);
 
   const allMeta: AreaMeta[] = [];
