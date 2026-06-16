@@ -1,5 +1,28 @@
 # Layout algorithm notes — pickup-where-we-left-off
 
+## Session 5 (2026-06-16): generalized the sub-block re-embed; applied it to Arcadia
+
+Generalized Session 4's `embedSouthBlock` into `embedSubBlock(ctx, members, minMembers,
+clearStep)` — the constraint-embed machinery is graph-generic; only the member set, sentinel
+and clear-direction were midgaard-specific. `embedSouthBlock` is now a thin wrapper passing the
+3100–3143 set + clearStep `[0,-1]`; **midgaard output is byte-identical** (verified: ws0/warp2/
+cross12 unchanged, global warps 871→868 = the Arcadia delta only).
+
+Applied it to **Arcadia** (`embedPalace`, gated to `arcadia`): the indoor fey-citadel court
+(vnums 12100–12154, z=0 level) was interleaved with the outdoor meadow, and the four self-looped
+`Вечная <season>` rooms (12151–12154 — exits all point to self; reachable only one-way from the
+Холлы) were exiled far east as a stray cluster → map-spanning wrong-side diagonals. Re-embedding
+the z=0 court as a rigid block makes the one-way `Холл→Вечная` edges into row/column constraints
+that seat each Вечная beside its Холл; `clearStep [0,1]` lifts the block clear ABOVE the meadow
+(Kit wanted the palace "higher than Цветочный Луг"). `reanchorAppendages` re-stacks the
+watchtower/basement chains (z≠0, vnums 12100–12155) that hang off the moved court by up/down
+exits, so they follow it instead of trailing long stubs. Result: Arcadia crossings 110→83,
+warps 28→25, wrong-side 4→2, palace y[13..41] fully above meadow y[-13..10].
+
+**Reusable pattern for the next tangled area:** find its z=0 sub-block vnums, add a `meta.file`-
+gated `embedSubBlock` call. Contained (can't regress other areas), proven. The remaining Arcadia
+crossings are intrinsic meadow tangle (Цветочный Луг grid + winding Тропа) — out of scope.
+
 ## Session 4 (2026-06-15): midgaard south — constraint re-embed on a local grid
 
 Goal: rebuild midgaard minimising warps, relaxing the grid (rooms/secondary paths needn't
