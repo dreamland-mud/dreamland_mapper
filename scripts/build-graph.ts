@@ -204,7 +204,12 @@ function main() {
   // (players can reach them, e.g. via a portal). Mirror the game's list + these extras;
   // we deliberately do NOT map every on-disk file (that would pull in hidden stubs and
   // instanced/disabled zones like donjon). Added only if present on disk.
-  const EXTRA_AREAS = ['area148.are']; // Orodruin / Mount Doom (vnum 35000-35099)
+  //
+  // NOTE: Orodruin / Mount Doom (vnum 35000-35099) used to live here as the stale
+  // `area148.are` snapshot, mapped because orodruin wasn't yet in area.lst.xml. It now IS
+  // (orodruin.are, the current 35k file the game loads), so it maps normally — adding
+  // area148 again would map the same vnums twice from an outdated April snapshot.
+  const EXTRA_AREAS: string[] = [];
   for (const extra of EXTRA_AREAS) {
     const stem = extra.replace(/\.are$/, '');
     if (
