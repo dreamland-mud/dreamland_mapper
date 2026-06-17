@@ -322,6 +322,48 @@ function placeMidgaardWalls(ctx: Ctx, rooms: Room[]): Set<number> {
   return placed;
 }
 
+/**
+ * Midgaard outer ring: the "Path around Midgaard" (3206-3214) plus the three beyond-gate
+ * rooms that bridge it to the wall. Generic BFS pins this loop's north stretch over the N
+ * gate (too narrow to reach the corners), so its W/E legs render as diagonals straight across
+ * the wall. Place it explicitly as an aligned ring one WALL_STEP outside the frame instead:
+ * west leg at x=-WALL_STEP, east leg at x=rightX+WALL_STEP, north stretch at y=+WALL_STEP
+ * (north of the wall), with 3210 aligned over the N gate. Runs after placeMidgaardWalls so the
+ * inner gate coords are known. No-op if the expected rooms/gates are absent.
+ */
+function placeMidgaardOuterPath(ctx: Ctx): Set<number> {
+  const placed = new Set<number>();
+  const OUTER = [3206, 3207, 3208, 3209, 3210, 3211, 3212, 3213, 3214];
+  const wg = ctx.placed.get(3040), eg = ctx.placed.get(3041), ng = ctx.placed.get(3262);
+  if (!wg || !eg || !ng) return placed;                       // gates not framed -> bail
+  if (!OUTER.every((v) => ctx.byVnum.has(v))) return placed;  // not the midgaard we expect
+
+  const bottomY = wg.y, rightX = eg.x, nx = ng.x;
+  const topY = WALL_STEP, westX = -WALL_STEP, eastX = rightX + WALL_STEP;
+  const put = (vn: number, x: number, y: number) => {
+    if (ctx.placed.has(vn) || ctx.cells.has(cellKey(x, y, 0))) return;
+    place(ctx, vn, x, y, 0, 0);
+    placed.add(vn);
+  };
+  // beyond-gate rooms bridge the wall to the ring (one cardinal hop to each inner gate)
+  put(3052, westX, bottomY);             // beyond W gate, E -> 3040
+  put(3053, eastX, bottomY);             // beyond E gate, W -> 3041
+  put(3268, nx, Math.round(topY / 2));   // beyond N gate, S -> 3262, N -> 3210
+  // west leg (column at westX): 3052 -> 3206 -> 3207 -> 3208(NW bend)
+  put(3206, westX, bottomY + 2 * WALL_STEP);
+  put(3207, westX, bottomY + 3 * WALL_STEP);
+  put(3208, westX, topY);
+  // north stretch at topY, 3210 over the N gate
+  put(3209, Math.round((westX + nx) / 2), topY);
+  put(3210, nx, topY);
+  put(3211, Math.round((nx + eastX) / 2), topY);
+  put(3212, eastX, topY);                // NE bend
+  // east leg (column at eastX): 3212 -> 3213 -> 3214 -> 3053
+  put(3213, eastX, 0);
+  put(3214, eastX, bottomY + 2 * WALL_STEP);
+  return placed;
+}
+
 /** Force a vertical street straight: trace the N-S chain through `anchor` and snap every room
  * to the chain's dominant x (keeps y). Outliers like Площадь Астрал join Изумрудный/Набережная. */
 function straightenVertical(ctx: Ctx, anchor: number): void {
@@ -575,7 +617,8 @@ export function computeLayout(
   if (meta.file === 'midgaard') {
     const wall = placeMidgaardWalls(ctx, rooms);
     if (wall.size > 0) {
-      bfsExpand(ctx, [...wall], 0);
+      const outer = placeMidgaardOuterPath(ctx);
+      bfsExpand(ctx, [...wall, ...outer], 0);
       placeStragglers(ctx, rooms, 0);
       for (const r of rooms) if (ctx.placed.has(r.vnum)) remaining.delete(r.vnum);
       let maxX = 0;
