@@ -122,7 +122,7 @@ let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(W)}" heig
 svg += `<rect width="100%" height="100%" fill="#121212"/>`;
 svg += `<g transform="translate(${ox},${oy})">`;
 
-let counts = { straight: 0, bent: 0, warp: 0, wrongside: 0, oneway: 0, cross: 0, vert: 0 };
+let counts = { straight: 0, bent: 0, warp: 0, wrongside: 0, oneway: 0, blocked: 0, cross: 0, vert: 0 };
 
 // edges
 for (const e of L.exits) {
@@ -156,13 +156,23 @@ for (const e of L.exits) {
       svg += `<path d="${d}" fill="none" stroke="#888888" stroke-width="2.0" stroke-dasharray="4 5" opacity="0.8"/>`;
       continue;
     }
-    const wrong = (() => {
-      if (fromP.z !== toP.z) return false;
-      const [ddx, ddy] = DIR_DELTAS[e.dir];
-      if (ddx !== 0) { const s = Math.sign(toP.x-fromP.x); return s!==0 && s!==Math.sign(ddx); }
-      if (ddy !== 0) { const s = Math.sign(toP.y-fromP.y); return s!==0 && s!==Math.sign(ddy); }
-      return false;
-    })();
+    const sgn = (dir) => {
+      if (fromP.z !== toP.z) return null;
+      const [ddx, ddy] = DIR_DELTAS[dir];
+      if (ddx !== 0) return [Math.sign(toP.x-fromP.x), Math.sign(ddx), toP.y===fromP.y];
+      if (ddy !== 0) return [Math.sign(toP.y-fromP.y), Math.sign(ddy), toP.x===fromP.x];
+      return null;
+    };
+    const sg = sgn(e.dir);
+    // Blocked warp — collinear, correct side, just a tile on the line → grey detour lane in the
+    // live map (mirrors mudjs Map.tsx), not a purple arc.
+    if (sg && sg[0] === sg[1] && sg[2]) {
+      counts.blocked++;
+      const dd = manhattanPath(cx1, cy1, TILE_W/2+EDGE_GAP, TILE_H/2+EDGE_GAP, cx2, cy2, TILE_W/2+EDGE_GAP, TILE_H/2+EDGE_GAP, e.dir, true);
+      svg += `<path d="${dd}" fill="none" stroke="#888888" stroke-width="2.0" stroke-dasharray="4 5" opacity="0.85"/>`;
+      continue;
+    }
+    const wrong = sg ? (sg[0] !== 0 && sg[0] !== sg[1]) : false;
     if (wrong) counts.wrongside++; else counts.warp++;
     svg += `<path d="${d}" fill="none" stroke="${wrong?'#ff3030':'#d384cb'}" stroke-width="2.4" stroke-dasharray="4 5"/>`;
     continue;
