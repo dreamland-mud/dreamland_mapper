@@ -122,7 +122,7 @@ let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(W)}" heig
 svg += `<rect width="100%" height="100%" fill="#121212"/>`;
 svg += `<g transform="translate(${ox},${oy})">`;
 
-let counts = { straight: 0, bent: 0, warp: 0, wrongside: 0, cross: 0, vert: 0 };
+let counts = { straight: 0, bent: 0, warp: 0, wrongside: 0, oneway: 0, cross: 0, vert: 0 };
 
 // edges
 for (const e of L.exits) {
@@ -148,6 +148,14 @@ for (const e of L.exits) {
     continue;
   }
   if (e.style === 'warp') {
+    const d = cardinalArc(cx1, cy1, TILE_W/2+EDGE_GAP, TILE_H/2+EDGE_GAP, cx2, cy2, TILE_W/2+EDGE_GAP, TILE_H/2+EDGE_GAP, e.dir);
+    // One-way warps render as a neutral grey directional connector in the live map, not a
+    // purple/red arc (see mudjs Map.tsx warp branch) — mirror that here.
+    if (e.bidirectional === false) {
+      counts.oneway++;
+      svg += `<path d="${d}" fill="none" stroke="#888888" stroke-width="2.0" stroke-dasharray="4 5" opacity="0.8"/>`;
+      continue;
+    }
     const wrong = (() => {
       if (fromP.z !== toP.z) return false;
       const [ddx, ddy] = DIR_DELTAS[e.dir];
@@ -156,7 +164,6 @@ for (const e of L.exits) {
       return false;
     })();
     if (wrong) counts.wrongside++; else counts.warp++;
-    const d = cardinalArc(cx1, cy1, TILE_W/2+EDGE_GAP, TILE_H/2+EDGE_GAP, cx2, cy2, TILE_W/2+EDGE_GAP, TILE_H/2+EDGE_GAP, e.dir);
     svg += `<path d="${d}" fill="none" stroke="${wrong?'#ff3030':'#d384cb'}" stroke-width="2.4" stroke-dasharray="4 5"/>`;
     continue;
   }
