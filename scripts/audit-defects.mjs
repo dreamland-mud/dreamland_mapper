@@ -16,7 +16,9 @@
  *
  * What renders as a curved ARC (the thing players see as a stray purple/red line):
  *   style==='warp' AND from!==to (self-loops are sticks) AND dir is N/S/E/W
- *   (up/down warps are intercepted as vertical lines/stubs, not arcs).
+ *   (up/down warps are intercepted as vertical lines/stubs, not arcs) AND the link is
+ *   bidirectional. ONE-WAY warps render as a neutral GREY directional connector + chevron
+ *   (not a purple/red arc) — they're counted separately as `oneway`, not as arcs.
  *   wrongSide() mirrors the renderer: opposite-half-plane → red, else purple.
  *
  * Override the data dir with $DATA_DIR (default: ../public/data next to this script).
@@ -64,22 +66,28 @@ function loadAreas() {
 /** Classify every warp in a layout by render form + root cause. */
 function classify(L) {
   const { rooms, placed } = L;
-  const out = { arcP: 0, arcR: 0, stick: 0, vline: 0, detail: [] };
+  const out = { arcP: 0, arcR: 0, oneway: 0, stick: 0, vline: 0, detail: [] };
   for (const e of L.exits) {
     if (e.style !== 'warp') continue;
     if (e.from === e.to) { out.stick++; continue; }
     if (e.dir === 'up' || e.dir === 'down') { out.vline++; continue; }
     const sP = placed[e.from], tP = placed[e.to], tR = rooms[e.to], sR = rooms[e.from];
     if (!sP || !tP || !tR) { out.arcR++; continue; }
-    const red = wrongSide(e.dir, sP, tP);
-    if (red) out.arcR++; else out.arcP++;
     const back = tR.exits.find((x) => x.target === e.from);
     const [dx, dy] = DELTA[e.dir];
     let kind, note = '';
-    if (red) kind = 'fold';
-    else if (back && back.dir !== REVERSE[e.dir]) { kind = 'mismatch'; note = `B:${back.dir}→A`; }
-    else if (!back) kind = 'oneway';
-    else kind = (dx !== 0 ? tP.y === sP.y : tP.x === sP.x) ? 'blocked' : 'perp';
+    // One-way warps render as a neutral grey directional connector + chevron, NOT a
+    // purple/red arc (see Map.tsx warp branch) — so they're not counted as arcs here.
+    if (!back) {
+      out.oneway++;
+      kind = 'oneway';
+    } else {
+      const red = wrongSide(e.dir, sP, tP);
+      if (red) out.arcR++; else out.arcP++;
+      if (red) kind = 'fold';
+      else if (back.dir !== REVERSE[e.dir]) { kind = 'mismatch'; note = `B:${back.dir}→A`; }
+      else kind = (dx !== 0 ? tP.y === sP.y : tP.x === sP.x) ? 'blocked' : 'perp';
+    }
     out.detail.push({
       from: e.from, to: e.to, dir: e.dir, kind, note,
       fromName: (sR?.name || '').replace(/\s+/g, ' ').slice(0, 24),
@@ -105,15 +113,16 @@ function globalReport(layouts) {
     String(r.arcs).padStart(5) + ' ' + String(r.arcP).padStart(5) + ' ' + String(r.arcR).padStart(4) + ' | ' +
     String(r.stick).padStart(5) + ' ' + String(r.vline).padStart(5)));
   const rc = { fold: 0, mismatch: 0, oneway: 0, blocked: 0, perp: 0 };
-  let arcs = 0, sticks = 0, vlines = 0;
+  let arcs = 0, oneway = 0, sticks = 0, vlines = 0;
   for (const r of rows) {
-    arcs += r.arcs; sticks += r.stick; vlines += r.vline;
+    arcs += r.arcs; oneway += r.oneway; sticks += r.stick; vlines += r.vline;
     for (const d of r.detail) rc[d.kind]++;
   }
-  console.log(`\nGLOBAL  arcs:${arcs}  sticks:${sticks}  vlines:${vlines}`);
+  console.log(`\nGLOBAL  arcs:${arcs}  oneway:${oneway}  sticks:${sticks}  vlines:${vlines}`);
   console.log('arc root-cause:', JSON.stringify(rc));
   console.log('  perp/fold = mostly intentional (3D / non-Euclidean / same-z mazes);');
-  console.log('  mismatch/oneway/broken = the area-data fix candidates (see --mismatch, --broken).');
+  console.log('  oneway = grey directional connectors (not arcs) — most intentional (chutes/falls);');
+  console.log('  mismatch/broken = the area-data fix candidates (see --mismatch, --broken).');
 }
 
 function areaReport(layouts, area) {
@@ -123,7 +132,7 @@ function areaReport(layouts, area) {
   const zc = {};
   for (const v of Object.keys(L.placed)) { const z = L.placed[v].z; zc[z] = (zc[z] || 0) + 1; }
   console.log(`${area} (${L.meta.name}) — ${Object.keys(L.rooms).length} rooms`);
-  console.log(`arcs: ${c.arcP + c.arcR} (purple ${c.arcP}, red ${c.arcR})   sticks ${c.stick}   vlines ${c.vline}`);
+  console.log(`arcs: ${c.arcP + c.arcR} (purple ${c.arcP}, red ${c.arcR})   oneway ${c.oneway}   sticks ${c.stick}   vlines ${c.vline}`);
   console.log('z-layers:', Object.keys(zc).sort((a, b) => a - b).map((z) => `${z}:${zc[z]}`).join(' '));
   const byKind = {};
   for (const d of c.detail) (byKind[d.kind] = byKind[d.kind] || []).push(d);
