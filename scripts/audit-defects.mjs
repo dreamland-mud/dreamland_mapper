@@ -259,6 +259,91 @@ function valveReport(layouts, area) {
   console.log(`\ntotal: ${n} suspect one-way exits` + (area ? '' : ' (pass an area to filter)'));
 }
 
+/** Largest z-layer's share of the MAIN (biggest) cluster — 1.0 = perfectly flat zone. */
+function mainClusterFlatPct(L) {
+  const sz = {};
+  for (const v of Object.keys(L.placed)) { const c = L.placed[v].cluster; sz[c] = (sz[c] || 0) + 1; }
+  let mc = 0, ms = -1;
+  for (const c of Object.keys(sz)) if (sz[c] > ms) { ms = sz[c]; mc = +c; }
+  const zc = {}; let tot = 0;
+  for (const v of Object.keys(L.placed)) if (L.placed[v].cluster === mc) { const z = L.placed[v].z; zc[z] = (zc[z] || 0) + 1; tot++; }
+  let mx = 0; for (const z of Object.keys(zc)) if (zc[z] > mx) mx = zc[z];
+  return tot ? mx / tot : 1;
+}
+
+/** Cardinal (N/S/E/W) exits whose two ends sit on DIFFERENT z-layers (dedup per pair). */
+function riftEdges(L) {
+  const { rooms, placed } = L;
+  const out = [], seen = new Set();
+  for (const v of Object.keys(rooms)) {
+    for (const e of rooms[v].exits) {
+      if (e.dir === 'up' || e.dir === 'down') continue;     // vertical by construction
+      const b = e.target, sP = placed[v], tP = placed[b];
+      if (!sP || !tP || !rooms[b]) continue;                // cross-area / broken / unplaced
+      if (sP.z === tP.z) continue;                          // coplanar → not a rift
+      const key = +v < +b ? `${v}-${b}` : `${b}-${v}`;
+      if (seen.has(key)) continue; seen.add(key);
+      out.push({
+        from: +v, to: +b, dir: e.dir, dz: tP.z - sP.z,
+        bidir: rooms[b].exits.some((x) => x.target === +v),
+        fromName: (rooms[v].name || '').replace(/\s+/g, ' ').slice(0, 22),
+        toName: (rooms[b].name || '').replace(/\s+/g, ' ').slice(0, 22),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Z-RIFTS: a flat corridor can only cross z when its target was already placed on another
+ * plane via a different route — two paths to one room disagreeing on height. That is an
+ * inconsistent-z CYCLE: a same-level street that also threads a net up/down loop (a bridge
+ * down to a river that rejoins at grade; a tower whose top reconnects to the street). The
+ * layout sacrifices one edge, and a whole district gets torn onto a separate plane. These
+ * hide in the 'perp' bucket, so they're surfaced separately here.
+ *
+ * Triage like 'mismatch'. In a MOSTLY-FLAT zone (high flat%, few zLayers) a rift is fixable:
+ * some VERTICAL exit in the cycle pins a coplanar district one floor off — reconsider whether
+ * it should be cardinal, or whether the flat rift edge should itself be up/down. In a 3D zone
+ * (many zLayers, low flat%) rifts are by design — leave them. `suspect` flags the fixable shape.
+ */
+function riftReport(layouts, area) {
+  if (area) {
+    const L = layouts[area];
+    if (!L) { console.error(`no area "${area}"`); process.exit(1); }
+    const r = riftEdges(L);
+    const zL = new Set(Object.values(L.placed).map((p) => p.z)).size;
+    console.log(`${area} (${L.meta.name}) — ${Object.keys(L.rooms).length} rooms, ${zL} z-layers, flat ${(mainClusterFlatPct(L) * 100).toFixed(0)}%`);
+    console.log(`z-rifts: ${r.length} (bidir ${r.filter((x) => x.bidir).length}, one-way ${r.filter((x) => !x.bidir).length})\n`);
+    for (const d of r.sort((a, b) => Math.abs(b.dz) - Math.abs(a.dz)))
+      console.log(`  ${d.from} ${d.dir.padEnd(5)}→ ${d.to}  Δz=${d.dz > 0 ? '+' + d.dz : d.dz}  ${d.bidir ? 'bidir ' : 'oneway'}  [${d.fromName} → ${d.toName}]`);
+    return;
+  }
+  const rows = [];
+  for (const af of Object.keys(layouts)) {
+    const L = layouts[af];
+    const r = riftEdges(L);
+    if (r.length === 0) continue;
+    const bidir = r.filter((x) => x.bidir).length;
+    const zL = new Set(Object.values(L.placed).map((p) => p.z)).size;
+    const flat = mainClusterFlatPct(L);
+    rows.push({ file: af, rooms: Object.keys(L.rooms).length, zL, rifts: r.length, bidir, oneway: r.length - bidir, flat });
+  }
+  // Fixable shape: a mostly-flat zone (one plane dominates, few layers) that still has
+  // bidirectional rifts — a district torn off a surface that wants to be coplanar.
+  const suspect = (r) => r.bidir > 0 && r.flat >= 0.5 && r.zL <= 5;
+  rows.sort((a, b) => (suspect(b) - suspect(a)) || b.bidir - a.bidir || b.rifts - a.rifts);
+  console.log('Z-RIFT zones: cardinal corridors split across z-layers (an inconsistent-z cycle).');
+  console.log("Buried in 'perp' until now. `suspect` = mostly-flat zone with bidir rifts = the fixable shape.\n");
+  console.log('   area            rooms  zL  rifts bidir oway  flat%  suspect');
+  console.log('-'.repeat(64));
+  for (const r of rows) console.log(
+    '   ' + r.file.padEnd(15) + ' ' + String(r.rooms).padStart(4) + ' ' + String(r.zL).padStart(3) + ' ' +
+    String(r.rifts).padStart(5) + ' ' + String(r.bidir).padStart(5) + ' ' + String(r.oneway).padStart(4) + ' ' +
+    String((r.flat * 100).toFixed(0) + '%').padStart(6) + '   ' + (suspect(r) ? '◄ SUSPECT' : ''));
+  console.log(`\n${rows.length} zones with rifts; ${rows.filter(suspect).length} suspect (mostly-flat, fixable). Pass an area for per-edge detail.`);
+}
+
 function main() {
   const { layouts, globalRoom, index } = loadAreas();
   const arg = process.argv[2];
@@ -266,6 +351,7 @@ function main() {
   if (arg === '--broken') return brokenReport(layouts, globalRoom, index);
   if (arg === '--oneway') return onewayReport(layouts, process.argv[3]);
   if (arg === '--valve') return valveReport(layouts, process.argv[3]);
+  if (arg === '--rifts') return riftReport(layouts, process.argv[3]);
   if (arg && !arg.startsWith('--')) return areaReport(layouts, arg);
   return globalReport(layouts);
 }
