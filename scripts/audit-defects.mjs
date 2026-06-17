@@ -344,6 +344,72 @@ function riftReport(layouts, area) {
   console.log(`\n${rows.length} zones with rifts; ${rows.filter(suspect).length} suspect (mostly-flat, fixable). Pass an area for per-edge detail.`);
 }
 
+/**
+ * Z-CYCLE: the root-cause tool behind a rift. A cardinal exit is a rift IFF the exit graph
+ * has a cycle through it whose vertical sum (up=+1, down=-1, cardinal=0) is nonzero — the
+ * layout can only change z on up/down, so a flat loop that nets a climb can't close. WHERE
+ * the layout shows the rift is traversal-dependent; the real obstruction is the unbalanced
+ * cycle. This re-labels z by pure BFS (cardinal=same z, up/down=±1) and reports every edge
+ * that violates its own constraint, with the offending loop and the verticals in it.
+ *
+ * To zero a zone: each independent net-vertical cycle needs exactly ONE vertical<->cardinal
+ * flip to balance it — either neutralise an unbalanced up/down (make it cardinal) or turn a
+ * cardinal step into the compensating up/down. The "flip candidates" line lists the verticals
+ * already in the loop; if none, a cardinal step in the loop must BECOME vertical. Pick the one
+ * the room descriptions justify (a shaft/stair/drop), then re-run --rifts to confirm 0.
+ */
+function cycleReport(layouts, area) {
+  const DZ = { north: 0, south: 0, east: 0, west: 0, up: 1, down: -1 };
+  const analyse = (L) => {
+    const R = L.rooms;
+    const adj = {};
+    for (const v of Object.keys(R)) {
+      adj[v] = [];
+      for (const e of R[v].exits) if (e.dir in DZ && R[e.target]) adj[v].push({ dir: e.dir, t: e.target });
+    }
+    const z = {}, parent = {};
+    for (const s of Object.keys(R)) {
+      if (s in z) continue;
+      z[s] = 0; const q = [+s];
+      while (q.length) {
+        const u = q.shift();
+        for (const { dir, t } of adj[u]) if (!(t in z)) { z[t] = z[u] + DZ[dir]; parent[t] = [u, dir]; q.push(t); }
+      }
+    }
+    const rootpath = (x) => { const p = [x]; while (x in parent) { x = parent[x][0]; p.push(x); } return p; };
+    const viol = [], seen = new Set();
+    for (const u of Object.keys(R)) for (const { dir, t } of adj[u]) {
+      if (z[t] !== z[u] + DZ[dir]) {
+        const k = Math.min(u, t) + '-' + Math.max(u, t);
+        if (!seen.has(k)) { seen.add(k); viol.push([+u, dir, t]); }
+      }
+    }
+    return { R, adj, z, rootpath, viol };
+  };
+  const show = (af, L) => {
+    const { R, adj, z, rootpath, viol } = analyse(L);
+    if (viol.length === 0) { console.log(`${af}: z-consistent — 0 net-vertical cycles (any layout rifts are traversal artifacts)`); return; }
+    console.log(`\n${af} (${L.meta.name}): ${viol.length} net-vertical cycle(s) — each needs ONE vertical<->cardinal flip to zero`);
+    for (const [u, d, w] of viol) {
+      const pu = rootpath(u), pw = rootpath(w);
+      const idx = new Map(pu.map((x, i) => [x, i]));
+      const lca = pw.find((x) => idx.has(x));
+      const cyc = pu.slice(0, idx.get(lca) + 1).concat(pw.slice(0, pw.indexOf(lca)).reverse());
+      const verts = [];
+      for (let i = 0; i < cyc.length; i++) {
+        const a = cyc[i], b = cyc[(i + 1) % cyc.length];
+        const e = adj[a].find((x) => x.t === b) || adj[b].find((x) => x.t === a);
+        if (e && (e.dir === 'up' || e.dir === 'down')) verts.push(`${a} ${e.dir}→ ${b}`);
+      }
+      console.log(`\n  obstruction: ${u} ${d}→${w}  (forces z${z[u] + DZ[d]} vs z${z[w]})`);
+      console.log(`    loop (${cyc.length}): ${cyc.map((x) => `${x}[${(R[x].name || '').replace(/\s+/g, ' ').slice(0, 12)}]`).join(' ')}`);
+      console.log(`    flip candidates (verticals in loop): ${verts.length ? verts.join(', ') : '(none — a cardinal step in the loop must BECOME up/down)'}`);
+    }
+  };
+  if (area) { const L = layouts[area]; if (!L) { console.error(`no area "${area}"`); process.exit(1); } return show(area, L); }
+  for (const af of Object.keys(layouts)) { const L = layouts[af]; if (analyse(L).viol.length) show(af, L); }
+}
+
 function main() {
   const { layouts, globalRoom, index } = loadAreas();
   const arg = process.argv[2];
@@ -352,6 +418,7 @@ function main() {
   if (arg === '--oneway') return onewayReport(layouts, process.argv[3]);
   if (arg === '--valve') return valveReport(layouts, process.argv[3]);
   if (arg === '--rifts') return riftReport(layouts, process.argv[3]);
+  if (arg === '--cycle') return cycleReport(layouts, process.argv[3]);
   if (arg && !arg.startsWith('--')) return areaReport(layouts, arg);
   return globalReport(layouts);
 }
