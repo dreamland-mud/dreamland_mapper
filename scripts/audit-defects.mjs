@@ -13,6 +13,8 @@
  *   node scripts/audit-defects.mjs --mismatch   ALL reverse-dir mismatch pairs + reverse-slot status (fix list)
  *   node scripts/audit-defects.mjs --broken     exits whose target room exists in no mapped area
  *   node scripts/audit-defects.mjs --oneway [area]   one-way exits (A→B with no B→A)
+ *   node scripts/audit-defects.mjs --valve [area]    topologically-suspect one-way exits
+ *                                                    (A dir→B, no return, B anchored elsewhere)
  *
  * What renders as a curved ARC (the thing players see as a stray purple/red line):
  *   style==='warp' AND from!==to (self-loops are sticks) AND dir is N/S/E/W
@@ -205,12 +207,61 @@ function onewayReport(layouts, area) {
   console.log(`\ntotal: ${n} one-way exits` + (!area && n > 60 ? ' (showing first 60; pass an area to filter)' : ''));
 }
 
+/**
+ * Topologically-suspect one-way exits: A dir→B (horizontal, no return) where B is ALSO
+ * anchored by its own two-way links — so the one-way exit asserts an adjacency that
+ * contradicts where B actually sits (the "rotating room" artifact, e.g. sewer 7037→7050).
+ *
+ * NOT auto-fixable. Many are intentional one-way ledges / slides / drops — read the room
+ * DESCRIPTIONS before adding a return exit or deleting. Exempt by construction: up/down
+ * pipes, and dead-drops (target reachable only one-way → falls/chutes, no two-way anchor).
+ */
+function valveReport(layouts, area) {
+  console.log('TOPOLOGICALLY-SUSPECT one-way exits (A dir→B, no return, B anchored elsewhere)\n');
+  console.log('Verify room descriptions before editing: add a return exit, delete the one-way,');
+  console.log('or leave it (intentional ledge/slide/drop). Exempt: up/down + dead-drop falls.\n');
+  let n = 0;
+  for (const af of Object.keys(layouts)) {
+    if (area && af !== area) continue;
+    const L = layouts[af];
+    const R = L.rooms, P = L.placed;
+    const back = (a, b) => R[b] && R[b].exits.some((x) => x.target === +a);
+    const rows = [];
+    for (const v of Object.keys(R)) {
+      for (const e of R[v].exits) {
+        if (e.dir === 'up' || e.dir === 'down') continue; // vertical pipes exempt
+        const b = e.target;
+        if (!R[b]) continue;                              // cross-area / broken
+        if (back(v, b)) continue;                         // two-way → fine
+        const anchored = R[b].exits.filter((x) => back(b, x.target)).length;
+        if (anchored === 0) continue;                     // dead-drop fall/chute → exempt
+        const pa = P[v], pb = P[b];
+        let rel = '?';
+        if (pa && pb && pa.z === pb.z) {
+          const [dx, dy] = DELTA[e.dir];
+          const sx = Math.sign(pb.x - pa.x), sy = Math.sign(pb.y - pa.y);
+          rel = (dx !== 0 ? sx === dx : sy === dy) ? 'correct-side'
+            : (dx !== 0 ? sx === -dx : sy === -dy) ? 'OPPOSITE' : 'perp';
+        } else if (pa && pb) rel = 'cross-z';
+        rows.push({ v: +v, dir: e.dir, b, anchored, rel, name: (R[b].name || '').slice(0, 22) });
+      }
+    }
+    if (rows.length === 0) continue;
+    console.log(`${af} (${rows.length}):`);
+    for (const r of rows) console.log(
+      `  ${r.v} ${r.dir.padEnd(5)}→ ${r.b}  [anchor:${r.anchored}tw ${r.rel}]  ${r.name}`);
+    n += rows.length;
+  }
+  console.log(`\ntotal: ${n} suspect one-way exits` + (area ? '' : ' (pass an area to filter)'));
+}
+
 function main() {
   const { layouts, globalRoom, index } = loadAreas();
   const arg = process.argv[2];
   if (arg === '--mismatch') return mismatchReport(layouts);
   if (arg === '--broken') return brokenReport(layouts, globalRoom, index);
   if (arg === '--oneway') return onewayReport(layouts, process.argv[3]);
+  if (arg === '--valve') return valveReport(layouts, process.argv[3]);
   if (arg && !arg.startsWith('--')) return areaReport(layouts, arg);
   return globalReport(layouts);
 }
