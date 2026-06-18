@@ -42,7 +42,9 @@ function decodeEntities(s: string): string {
 
 /**
  * Strip Dreamland render markers from a display string:
- *  - color codes  `{r`, `{g`, `{x`, `{D`, `{1`, `{2`, `{Sf…{Sx` etc. → drop the marker
+ *  - color codes  `{r`, `{g`, `{x`, `{D`, `{1`, `{2` etc. → drop the marker
+ *  - gender (flexer) switches `{Sf…{Sm…{Sx` → KEEP verbatim, resolved per player sex by the
+ *    web client (mudjs flexer.js); colour codes inside them are still stripped
  *  - pad-string genitive cascades  `майст|ер|ра|ру|ра|ром|ре` → keep just the nominative head
  *    (text before the first `|`)
  *  - `{hh<vnum>...{x` help anchors → keep inner text only
@@ -58,12 +60,15 @@ function stripMarkers(s: string): string {
   // that stripper, which would otherwise eat "{h" and leave the stray "c" (the "cюг" bug).
   out = out.replace(/\{hc/g, '');
   out = out.replace(/\{hx/g, '');
-  // {Sf<f>{Sm<m>{Sx → use male form (or female if no male) — avoids wrong gender on display
-  out = out.replace(/\{Sf([^{]*)\{Sm([^{]*)\{Sx/g, '$2');
-  // {Sf<f>{Sx → drop female-only suffix entirely (parent stem already in surrounding text)
-  out = out.replace(/\{Sf[^{]*\{Sx/g, '');
+  // Preserve gender (flexer) switches {Sm}{Sf}{Sx so the web client can resolve them per
+  // player sex instead of baking a single (male) form here. Shield them from the generic
+  // {<alnum> stripper below (which would eat "{S" and leave a stray "m"/"f"), then restore.
+  // Colour codes inside the switch content are NOT shielded, so they still get stripped.
+  out = out.replace(/\{S([mfx])/g, '\x01$1');
   // generic color/style codes: {<letter or digit>
   out = out.replace(/\{[a-zA-Z0-9]/g, '');
+  // restore the shielded flexer switches
+  out = out.replace(/\x01([mfx])/g, '{S$1');
   // Flexer pad-string cascade: <stem>|<nom>|<gen>|<dat>|<acc>|<inst>|<prep>
   // Render nominative form: stem + first case ending. Repeat for each cascade in the string.
   // Case alternates contain no spaces (word-internal), so use [^\s|]* to prevent
