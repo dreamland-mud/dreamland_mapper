@@ -251,7 +251,7 @@ function isCorrectSide(src: PlacedRoom, tgt: PlacedRoom, dir: Direction): boolea
 }
 
 function emitAllEdges(ctx: Ctx, rooms: Room[]): void {
-  const relaxed = ctx.meta.file === 'midgaard';
+  const relaxed = ctx.meta.file === 'midgaard' || ctx.meta.file === 'smidgaard';
   for (const room of rooms) {
     const src = ctx.placed.get(room.vnum);
     for (const exit of room.exits) {
@@ -393,32 +393,29 @@ function straightenVertical(ctx: Ctx, anchor: number): void {
 }
 
 /**
- * Midgaard southern district — minimal-warp re-embed on its own local grid.
+ * Re-embed a grid-consistent block of rooms onto its OWN tight local grid, with zero
+ * wrong-side warps and zero collisions.
  *
- * The Emerald Avenue / Park / Crowded Street complex (vnums ~3100–3143 + a few) is fully
- * grid-consistent: laid out by a row/column CONSTRAINT embedding it needs ZERO wrong-side
- * warps. The trunk-first BFS, forcing it onto the main city lattice, instead produced two
- * map-spanning opposite-side warps (3118↔3135, 3119↔3133) plus a stack of off-axis bends.
- *
- * Per the design brief ("rooms/secondary paths don't need to share the main-street grid,
- * paths needn't be the same length"), this block lives on its OWN tighter grid — which is
- * exactly what lets it embed cleanly. We:
+ * Used for districts the trunk-first BFS can't embed on the main lattice even though they ARE
+ * grid-consistent: midgaard's Emerald Avenue / Park / Crowded Street complex (a sub-block that
+ * stitches back into the placed city — `standalone=false`), and smidgaard, whose whole surface
+ * is one such grid with no surrounding city to attach to (`standalone=true`). Algorithm:
  *   1. union-find columns (N/S edges share x) and rows (E/W edges share y),
- *   2. longest-path rank each class (compact; midgaard's class graph is cycle-free),
+ *   2. longest-path rank each class (compact; both blocks' class graphs are cycle-free),
  *   3. conflict-colour per rank to separate only the classes that would actually collide,
  *      giving 0 warps + 0 collisions,
- *   4. stitch the rigid block into the already-placed city at whichever attachment yields the
- *      fewest bent cross-block edges, then shift it clear of existing rooms.
+ *   4a. standalone: place the rigid block directly at z=0 (caller hangs any vertical-only
+ *       components — e.g. an underground river — off their seams afterwards), OR
+ *   4b. sub-block: stitch into the already-placed city at whichever attachment yields the
+ *       fewest bent cross-block edges, then shift it clear of existing rooms.
  *
- * No-op (returns false) if the expected rooms are absent, so it can't corrupt another area.
+ * No-op (returns false) if the block is too small to be the expected grid.
  */
-function embedSouthBlock(ctx: Ctx): boolean {
-  const SOUTH = new Set<number>();
-  for (let v = 3100; v <= 3143; v++) SOUTH.add(v);
-  [3047, 3051, 3068, 3069, 3070, 3255, 3256, 3270, 3271, 3272, 3273].forEach((v) => SOUTH.add(v));
-  const members = [...SOUTH].filter((v) => ctx.byVnum.has(v));
-  if (members.length < 20) return false;  // sentinel — not the midgaard we expect
-  const inBlock = (v: number) => SOUTH.has(v) && ctx.byVnum.has(v);
+function embedGridBlock(ctx: Ctx, memberVnums: number[], standalone: boolean): boolean {
+  const blockSet = new Set<number>(memberVnums);
+  const members = memberVnums.filter((v) => ctx.byVnum.has(v));
+  if (members.length < 20) return false;  // sentinel — too small to be the expected grid
+  const inBlock = (v: number) => blockSet.has(v) && ctx.byVnum.has(v);
 
   // Internal cardinal edges (dedup undirected per axis).
   const edges: Array<{ u: number; v: number; dir: Direction }> = [];
@@ -529,9 +526,20 @@ function embedSouthBlock(ctx: Ctx): boolean {
   repair(yf, Ry, (v) => lx.get(v)!, ly, yClasses); // split rows, dense ly
   repair(xf, Rx, (v) => ly.get(v)!, lx, xClasses); // split columns, dense lx
 
-  // Local coords are now clean (0 warps, 0 collisions). Stitch into the city: pick the
-  // attachment to an already-placed non-block room minimising bent cross-block edges.
+  // Local coords are now clean (0 warps, 0 collisions).
   const SCALE = 2;    // local cell → grid cells (block keeps its own tight pitch)
+
+  // Standalone whole-area block: nothing else is placed yet, so the clean local grid IS the
+  // layout — drop it at the origin at z=0. The caller hangs vertical-only components afterwards.
+  if (standalone) {
+    for (const u of members) {
+      place(ctx, u, SCALE * lx.get(u)!, SCALE * ly.get(u)!, 0, 0, isMazeRoom(ctx.byVnum.get(u)!));
+    }
+    return true;
+  }
+
+  // Sub-block: stitch into the city — pick the attachment to an already-placed non-block room
+  // minimising bent cross-block edges.
   const GAP = 3;      // attachment connector length into the city
   interface Att { cityV: number; blockV: number; dir: Direction; } // dir = block → city
   const atts: Att[] = [];
@@ -596,6 +604,76 @@ function embedSouthBlock(ctx: Ctx): boolean {
   return true;
 }
 
+/** Midgaard southern district (Emerald/Park/Crowded) — the original sub-block caller. */
+function embedSouthBlock(ctx: Ctx): boolean {
+  const SOUTH = new Set<number>();
+  for (let v = 3100; v <= 3143; v++) SOUTH.add(v);
+  [3047, 3051, 3068, 3069, 3070, 3255, 3256, 3270, 3271, 3272, 3273].forEach((v) => SOUTH.add(v));
+  return embedGridBlock(ctx, [...SOUTH], false);
+}
+
+/**
+ * Whole-area clean-grid embed for a self-contained grid city (smidgaard / Южный Мидгаард).
+ * Its surface is grid-consistent (verified: acyclic column/row classes, 0 warps, 0 collisions)
+ * but trunk-first BFS forced it onto one lattice and produced 14 off-axis arcs. Unlike the
+ * midgaard sub-block there is no surrounding placed city to stitch into — every external exit is
+ * cross-area — so the block IS the area: embed its surface directly at z=0, then hang the
+ * vertical-only components (the underground river at z=-1) off their up/down seams. No-op
+ * (returns false) if the area's largest cardinal component is too small to be the expected grid.
+ */
+function embedStandaloneArea(ctx: Ctx, rooms: Room[]): boolean {
+  // Largest cardinal-connected component = the surface grid; the river is a separate component
+  // joined to the surface only by up/down seams.
+  const adj = new Map<number, number[]>();
+  for (const r of rooms) adj.set(r.vnum, []);
+  for (const r of rooms) {
+    for (const e of r.exits) {
+      if (e.dir === 'up' || e.dir === 'down' || !ctx.byVnum.has(e.target)) continue;
+      adj.get(r.vnum)!.push(e.target);
+    }
+  }
+  const seen = new Set<number>();
+  let surface: number[] = [];
+  for (const r of rooms) {
+    if (seen.has(r.vnum)) continue;
+    const comp: number[] = []; const q = [r.vnum]; seen.add(r.vnum);
+    while (q.length) {
+      const v = q.shift()!; comp.push(v);
+      for (const w of adj.get(v) ?? []) if (!seen.has(w)) { seen.add(w); q.push(w); }
+    }
+    if (comp.length > surface.length) surface = comp;
+  }
+  if (!embedGridBlock(ctx, surface, true)) return false;
+
+  // Hang vertical-only components (the river) directly under/over their up/down seam to a
+  // placed room, then BFS the rest of that component out cardinally on its own z-plane.
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const r of rooms) {
+      if (ctx.placed.has(r.vnum)) continue;
+      for (const e of r.exits) {
+        if (e.dir !== 'up' && e.dir !== 'down') continue;
+        const partner = ctx.placed.get(e.target);
+        if (!partner) continue;
+        const nz = partner.z - DIR_DELTAS[e.dir][2];
+        let x = partner.x, y = partner.y;
+        if (ctx.cells.has(cellKey(x, y, nz))) {
+          const f = findFreeNear(ctx, x, y, nz);
+          if (!f) continue;
+          x = f.x; y = f.y;
+        }
+        place(ctx, r.vnum, x, y, nz, 0, isMazeRoom(r));
+        ctx.arrivalDir.set(r.vnum, REVERSE_DIR[e.dir]);
+        bfsExpand(ctx, [r.vnum], 0);
+        progress = true; break;
+      }
+    }
+  }
+  placeStragglers(ctx, rooms, 0);
+  return true;
+}
+
 export function computeLayout(
   meta: AreaMeta,
   rooms: Room[],
@@ -626,6 +704,12 @@ export function computeLayout(
       cursorX = maxX + CLUSTER_GAP;
       cluster = 1;
     }
+  }
+
+  // Smidgaard (Южный Мидгаард): a self-contained grid city — embed it whole on a clean local
+  // grid before the generic BFS, which otherwise produces 14 grid-irreducible off-axis arcs.
+  if (meta.file === 'smidgaard' && embedStandaloneArea(ctx, rooms)) {
+    for (const r of rooms) if (ctx.placed.has(r.vnum)) remaining.delete(r.vnum);
   }
 
   while (remaining.size > 0) {
