@@ -477,8 +477,38 @@ function embedGridBlock(ctx: Ctx, memberVnums: number[], standalone: boolean): b
     }
     return rank;
   };
+  // Tightening (standalone/smidgaard only): longest-path-from-sources parks an under-constrained
+  // appendage class (an interior stub hanging off the grid by one exit) at rank 0, stretching its
+  // single edge clear across the map and crossing everything. Pull each loose class to its
+  // neighbours' median, clamped to the *current* neighbour-feasible range so every ordering
+  // constraint stays satisfied; rigid grid classes (range collapses to one value) never move.
+  // Gated off for the midgaard sub-block (standalone=false) so its embed stays byte-identical.
+  const tighten = (classes: Set<number>, ord: Array<[number, number]>, asap: Map<number, number>): Map<number, number> => {
+    const succ = new Map<number, Set<number>>(), pred = new Map<number, Set<number>>();
+    for (const c of classes) { succ.set(c, new Set()); pred.set(c, new Set()); }
+    for (const [a, b] of ord) { if (a !== b) { succ.get(a)!.add(b); pred.get(b)!.add(a); } }
+    let maxR = 0; for (const c of classes) maxR = Math.max(maxR, asap.get(c)!);
+    const rank = new Map(asap);
+    for (let pass = 0; pass < 16; pass++) {
+      let moved = false;
+      for (const v of classes) {
+        let lo = 0, hi = maxR;
+        const targets: number[] = [];
+        for (const p of pred.get(v)!) { const r = rank.get(p)!; lo = Math.max(lo, r + 1); targets.push(r + 1); }
+        for (const s of succ.get(v)!) { const r = rank.get(s)!; hi = Math.min(hi, r - 1); targets.push(r - 1); }
+        if (!targets.length || lo > hi) continue;   // isolated, or (defensively) infeasible
+        targets.sort((a, b) => a - b);
+        const want = Math.max(lo, Math.min(hi, targets[(targets.length - 1) >> 1]));
+        if (want !== rank.get(v)!) { rank.set(v, want); moved = true; }
+      }
+      if (!moved) break;
+    }
+    return rank;
+  };
   const xClasses = new Set(members.map(xf)), yClasses = new Set(members.map(yf));
-  const Rx = longestPath(xClasses, xord), Ry = longestPath(yClasses, yord);
+  const Rx0 = longestPath(xClasses, xord), Ry0 = longestPath(yClasses, yord);
+  const Rx = standalone ? tighten(xClasses, xord, Rx0) : Rx0;
+  const Ry = standalone ? tighten(yClasses, yord, Ry0) : Ry0;
 
   const lx = new Map<number, number>(), ly = new Map<number, number>();
   for (const v of members) { lx.set(v, Rx.get(xf(v))!); ly.set(v, Ry.get(yf(v))!); }
