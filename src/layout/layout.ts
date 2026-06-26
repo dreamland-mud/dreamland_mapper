@@ -535,7 +535,12 @@ function embedGridBlock(ctx: Ctx, memberVnums: number[], standalone: boolean): b
         for (const v of (mem.get(c) ?? [])) { const s = sec(v); if (s < lo) lo = s; if (s > hi) hi = s; }
         span.set(c, [lo, hi]);
       }
-      cs.sort((a, b) => a - b);
+      // Pack the longer class first (standalone/smidgaard): a through-chain (perimeter street)
+      // claims the outer sub-column and the short appendage hanging off the grid snuggles to the
+      // inner one beside its anchor, instead of the appendage falling outside by arbitrary vnum
+      // order. Midgaard (standalone=false) keeps the vnum tiebreak so its embed stays identical.
+      if (standalone) cs.sort((a, b) => ((mem.get(b)?.length ?? 0) - (mem.get(a)?.length ?? 0)) || (a - b));
+      else cs.sort((a, b) => a - b);
       const cols: Array<Array<[number, number]>> = [];
       for (const c of cs) {
         const [lo, hi] = span.get(c)!;
@@ -564,6 +569,39 @@ function embedGridBlock(ctx: Ctx, memberVnums: number[], standalone: boolean): b
   if (standalone) {
     for (const u of members) {
       place(ctx, u, SCALE * lx.get(u)!, SCALE * ly.get(u)!, 0, 0, isMazeRoom(ctx.byVnum.get(u)!));
+    }
+    // Leaf-snap: a dead-end room (one in-block cardinal exit) can land several cells out from its
+    // anchor when densify slotted an intervening column/row between them — its long stub edge then
+    // jumps over a perimeter line. Pull each such leaf to the cell beside its anchor when that cell
+    // is free AND doesn't drop the leaf onto an unrelated edge (which would just trade a crossing
+    // for a misleading node-on-edge). Snap only when it's a strict improvement.
+    const segs: Array<[number, number, number, number]> = [];
+    for (const u of members) {
+      for (const e of ctx.byVnum.get(u)!.exits) {
+        if (e.dir === 'up' || e.dir === 'down' || !inBlock(e.target)) continue;
+        const a = ctx.placed.get(u), b = ctx.placed.get(e.target);
+        if (a && b && a.z === 0 && b.z === 0 && u < e.target) segs.push([a.x, a.y, b.x, b.y]);
+      }
+    }
+    const onSeg = (px: number, py: number, ax: number, ay: number, bx: number, by: number) =>
+      (bx - ax) * (py - ay) === (by - ay) * (px - ax) &&
+      Math.min(ax, bx) <= px && px <= Math.max(ax, bx) && Math.min(ay, by) <= py && py <= Math.max(ay, by);
+    for (const u of members) {
+      const ex = ctx.byVnum.get(u)!.exits.filter((e) => e.dir !== 'up' && e.dir !== 'down' && inBlock(e.target));
+      if (ex.length !== 1) continue;
+      const A = ctx.placed.get(ex[0].target), R = ctx.placed.get(u);
+      if (!A || !R || A.z !== 0 || R.z !== 0) continue;
+      const [dx, dy] = DIR_DELTAS[ex[0].dir];
+      const tx = A.x - dx * SCALE, ty = A.y - dy * SCALE;
+      if ((tx === R.x && ty === R.y) || ctx.cells.has(cellKey(tx, ty, 0))) continue;
+      // reject if the target cell sits on any edge not incident to R or its anchor
+      if (segs.some(([ax, ay, bx, by]) =>
+        !(ax === A.x && ay === A.y) && !(bx === A.x && by === A.y) &&
+        !(ax === R.x && ay === R.y) && !(bx === R.x && by === R.y) &&
+        onSeg(tx, ty, ax, ay, bx, by))) continue;
+      ctx.cells.delete(cellKey(R.x, R.y, 0));
+      R.x = tx; R.y = ty;
+      ctx.cells.set(cellKey(tx, ty, 0), u);
     }
     return true;
   }
