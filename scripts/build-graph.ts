@@ -10,7 +10,7 @@ import { XMLParser } from 'fast-xml-parser';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { AreaMeta, Direction, Exit, MapperIndex, Room } from '../src/types.js';
+import type { AreaMeta, Direction, Exit, LocalizedText, MapperIndex, Room } from '../src/types.js';
 import { ALL_DIRECTIONS } from '../src/types.js';
 import { computeLayout } from '../src/layout/layout.js';
 
@@ -98,6 +98,36 @@ function pickLang(nodes: any | any[] | undefined): string {
   return stripMarkers(decodeEntities(raw.trim()));
 }
 
+/** Pull a `<tag l="LANG">value</tag>` for one specific language only (no fallback). */
+function langOf(nodes: any | any[] | undefined, l: string): string {
+  if (nodes == null) return '';
+  const node = arr(nodes).find((n) => n?.['@_l'] === l);
+  if (node == null) return '';
+  const raw = typeof node === 'string' ? node : String(node['#text'] ?? '');
+  return stripMarkers(decodeEntities(raw.trim()));
+}
+
+/**
+ * Per-language name (+ optional description) for the non-default locales, so the web
+ * map can render room/area text in the viewer's config language. The default `name`
+ * field stays RU-preferred (pickLang); this only carries en/ua when the XML has them.
+ * Returns undefined when nothing localizes, to keep the JSON lean.
+ */
+function i18nOf(nameNodes: any, descNodes?: any): LocalizedText | undefined {
+  const out: LocalizedText = {};
+  for (const l of ['en', 'ua'] as const) {
+    const entry: { name?: string; description?: string } = {};
+    const n = langOf(nameNodes, l);
+    if (n) entry.name = n;
+    if (descNodes !== undefined) {
+      const d = langOf(descNodes, l);
+      if (d) entry.description = d;
+    }
+    if (entry.name || entry.description) out[l] = entry;
+  }
+  return out.en || out.ua ? out : undefined;
+}
+
 function parseFlags(raw: string | undefined): string[] {
   if (!raw) return [];
   return String(raw).trim().split(/\s+/).filter(Boolean);
@@ -149,6 +179,7 @@ function parseArea(filePath: string, file: string): { meta: AreaMeta; rooms: Roo
     flags: parseFlags(ad.flags),
     speedwalk: pickLang(ad.speedwalk) || undefined,
     altname: pickLang(ad.altname) || undefined,
+    i18n: i18nOf(ad.name),
   };
 
   const roomNodes = arr(area.rooms?.node);
@@ -174,6 +205,7 @@ function parseArea(filePath: string, file: string): { meta: AreaMeta; rooms: Roo
       sector: String(rn?.sector ?? 'unknown'),
       flags: parseFlags(rn?.flags),
       exits,
+      i18n: i18nOf(rn?.name, rn?.description),
     });
   }
 

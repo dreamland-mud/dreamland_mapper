@@ -39,6 +39,16 @@ export interface Exit {
   keyword?: string;      // door noun; when present and 'isdoor' set, exit has a door
 }
 
+/**
+ * Per-language overrides for the non-default (non-RU) locales. The top-level
+ * `name`/`description` stay RU-preferred; this carries en/ua when the area XML
+ * has them, so the web map can render in the viewer's config language.
+ */
+export interface LocalizedText {
+  en?: { name?: string; description?: string };
+  ua?: { name?: string; description?: string };
+}
+
 export interface Room {
   vnum: number;
   area: string;          // area filename (no .are.xml)
@@ -47,6 +57,7 @@ export interface Room {
   sector: Sector | string;
   flags: string[];       // 'dark', 'indoors', 'no_mob', etc.
   exits: Exit[];
+  i18n?: LocalizedText;  // en/ua name+description when present in the area XML
 }
 
 export interface AreaMeta {
@@ -60,6 +71,7 @@ export interface AreaMeta {
   flags: string[];       // 'hard', etc.
   speedwalk?: string;    // hint to entry path; first char often a vnum lookup
   altname?: string;
+  i18n?: LocalizedText;  // en/ua area name when present in the area XML
 }
 
 /* ---------- Layout output (post-BFS) ---------- */
