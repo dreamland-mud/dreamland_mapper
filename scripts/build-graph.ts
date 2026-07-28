@@ -108,22 +108,26 @@ function langOf(nodes: any | any[] | undefined, l: string): string {
 }
 
 /**
- * Per-language name (+ optional description) for the non-default locales, so the web
- * map can render room/area text in the viewer's config language. The default `name`
- * field stays RU-preferred (pickLang); this only carries en/ua when the XML has them.
- * Returns undefined when nothing localizes, to keep the JSON lean.
+ * Per-language name (+ optional description, + optional speedwalk) for the non-default
+ * locales, so the web map can render room/area text in the viewer's config language.
+ * The default fields stay RU-preferred (pickLang); this only carries en/ua when the XML
+ * has them. Returns undefined when nothing localizes, to keep the JSON lean.
  */
-function i18nOf(nameNodes: any, descNodes?: any): LocalizedText | undefined {
+function i18nOf(nameNodes: any, descNodes?: any, walkNodes?: any): LocalizedText | undefined {
   const out: LocalizedText = {};
   for (const l of ['en', 'ua'] as const) {
-    const entry: { name?: string; description?: string } = {};
+    const entry: { name?: string; description?: string; speedwalk?: string } = {};
     const n = langOf(nameNodes, l);
     if (n) entry.name = n;
     if (descNodes !== undefined) {
       const d = langOf(descNodes, l);
       if (d) entry.description = d;
     }
-    if (entry.name || entry.description) out[l] = entry;
+    if (walkNodes !== undefined) {
+      const w = langOf(walkNodes, l);
+      if (w) entry.speedwalk = w;
+    }
+    if (entry.name || entry.description || entry.speedwalk) out[l] = entry;
   }
   return out.en || out.ua ? out : undefined;
 }
@@ -179,7 +183,11 @@ function parseArea(filePath: string, file: string): { meta: AreaMeta; rooms: Roo
     flags: parseFlags(ad.flags),
     speedwalk: pickLang(ad.speedwalk) || undefined,
     altname: pickLang(ad.altname) || undefined,
-    i18n: i18nOf(ad.name),
+    /* Most speedwalks are a compass path and read the same in any language, but
+       30 of them are a sentence ("enter the portal in your city's temple"), and
+       pickLang alone handed the Russian one to every reader. The area XML has
+       had all three languages all along. */
+    i18n: i18nOf(ad.name, undefined, ad.speedwalk),
   };
 
   const roomNodes = arr(area.rooms?.node);
