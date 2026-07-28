@@ -45,8 +45,8 @@ export interface Exit {
  * has them, so the web map can render in the viewer's config language.
  */
 export interface LocalizedText {
-  en?: { name?: string; description?: string };
-  ua?: { name?: string; description?: string };
+  en?: { name?: string; description?: string; speedwalk?: string };
+  ua?: { name?: string; description?: string; speedwalk?: string };
 }
 
 export interface Room {
