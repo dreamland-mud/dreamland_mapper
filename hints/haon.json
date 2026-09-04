@@ -1,0 +1,10 @@
+{
+  "area": "haon",
+  "source": "hand-corrected in the game client",
+  "updated": "2026-09-04",
+  "rooms": {
+    "6013": { "x": 0, "y": -9, "z": 0 },
+    "6156": { "x": 0, "y": -7.5, "z": 0 },
+    "6157": { "x": 0, "y": -7.5, "z": -1 }
+  }
+}

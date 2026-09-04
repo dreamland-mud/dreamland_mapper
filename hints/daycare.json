@@ -1,0 +1,10 @@
+{
+  "area": "daycare",
+  "source": "hand-corrected in the game client",
+  "updated": "2026-09-04",
+  "rooms": {
+    "6608": { "x": 3, "y": 0, "z": 0 },
+    "6610": { "x": 3, "y": -3, "z": 0 },
+    "6626": { "x": 1.5, "y": 0, "z": 0 }
+  }
+}
