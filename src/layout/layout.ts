@@ -20,6 +20,7 @@
  */
 import type { AreaLayout, AreaMeta, Direction, Exit, ExitStyle, PlacedExit, PlacedRoom, Room } from '../types.js';
 import { DIR_DELTAS, REVERSE_DIR } from '../types.js';
+import type { Hints } from './hints.js';
 
 const MIN_LEN = 3;     // shortest connector (cells) — a clean visual gap
 const MAX_LEN = 40;    // furthest a straight connector extends before giving up cardinal
@@ -78,13 +79,21 @@ function pickAnchor(rooms: Room[]): Room {
       : (r.exits.length === best.exits.length && r.vnum < best.vnum ? r : best), pool[0]);
 }
 
-/** True if every cell strictly between (sx,sy) and (tx,ty) on a cardinal axis is empty. */
+/**
+ * True if every cell strictly between (sx,sy) and (tx,ty) on a cardinal axis is empty.
+ *
+ * Steps by a whole cell normally and by a half when any endpoint sits on a half — hint
+ * files may place a room between two rows, and walking in whole cells would both miss such
+ * a room and, worse, never reach the far end (the old `x !== tx` walk hung on the first
+ * fractional coordinate it met).
+ */
 function pathClear(ctx: Ctx, sx: number, sy: number, tx: number, ty: number, z: number): boolean {
   const dx = Math.sign(tx - sx), dy = Math.sign(ty - sy);
-  let x = sx + dx, y = sy + dy;
-  while (x !== tx || y !== ty) {
-    if (ctx.cells.has(cellKey(x, y, z))) return false;
-    x += dx; y += dy;
+  const half = [sx, sy, tx, ty].some((v) => v !== Math.trunc(v));
+  const step = half ? 0.5 : 1;
+  const span = Math.max(Math.abs(tx - sx), Math.abs(ty - sy));
+  for (let travelled = step; travelled < span; travelled += step) {
+    if (ctx.cells.has(cellKey(sx + dx * travelled, sy + dy * travelled, z))) return false;
   }
   return true;
 }
@@ -742,10 +751,45 @@ function embedStandaloneArea(ctx: Ctx, rooms: Room[]): boolean {
   return true;
 }
 
+/**
+ * Apply a hint file ON TOP of the finished layout: move the named rooms to the coordinates
+ * a human chose, leave every other room where the algorithm put it.
+ *
+ * A hint is a correction, not a seed. Seeding was tried first — pin the rooms, let BFS grow
+ * off them — and it made maps worse: the rest of the area regrows from a partial skeleton
+ * and loses everything the algorithm had got right. A correction keeps the algorithm's work
+ * and only overrules the rooms the author actually looked at.
+ *
+ * Coordinates may be fractional (halves place a room between two rows — that is how stairs
+ * and diagonals get separated), so cells are keyed by their exact value.
+ *
+ * Edges are NOT emitted yet when this runs: the caller emits after, so every style and warp
+ * is judged on the corrected positions.
+ */
+function applyHints(ctx: Ctx, hints: Hints): number {
+  let moved = 0;
+  for (const [vnum, spot] of hints) {
+    const p = ctx.placed.get(vnum);
+    if (!p) continue;                                    // room not in this area
+    if (p.x === spot.x && p.y === spot.y && p.z === spot.z) continue;
+    p.x = spot.x;
+    p.y = spot.y;
+    p.z = spot.z;
+    moved++;
+  }
+  if (!moved) return 0;
+  // Occupancy is what pathClear and the crossing checks read, so rebuild it from the
+  // corrected positions before any edge is emitted.
+  ctx.cells.clear();
+  for (const [vnum, p] of ctx.placed) ctx.cells.set(cellKey(p.x, p.y, p.z), vnum);
+  return moved;
+}
+
 export function computeLayout(
   meta: AreaMeta,
   rooms: Room[],
   vnumToArea: Record<number, string>,
+  hints?: Hints | null,
 ): AreaLayout {
   const byVnum = new Map<number, Room>();
   for (const r of rooms) byVnum.set(r.vnum, r);
@@ -811,6 +855,10 @@ export function computeLayout(
     // straightenVertical(3103) + placeMidgaardSouth, which produced the wrong-side warps.
     embedSouthBlock(ctx);
   }
+
+  // Hand corrections go on last, so the algorithm keeps everything it got right and the
+  // edges below are judged on the corrected map.
+  if (hints && hints.size) applyHints(ctx, hints);
 
   emitAllEdges(ctx, rooms);
 

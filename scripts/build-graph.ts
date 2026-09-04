@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import type { AreaMeta, Direction, Exit, LocalizedText, MapperIndex, Room } from '../src/types.js';
 import { ALL_DIRECTIONS } from '../src/types.js';
 import { computeLayout } from '../src/layout/layout.js';
+import { countBentEdges, hintSummary, pickLayout, readHints, type HintReportRow } from '../src/layout/hints.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -20,6 +21,11 @@ const AREAS_DIR = process.env.AREAS_DIR
   ? path.resolve(process.env.AREAS_DIR)
   : path.resolve(PROJECT_ROOT, '..', 'dreamland_areas');
 const OUT_DIR = path.join(PROJECT_ROOT, 'public', 'data');
+// Hand-corrected coordinates, one file per area. Absent directory = no hints at all,
+// which is the state every area starts in.
+const HINTS_DIR = process.env.HINTS_DIR
+  ? path.resolve(process.env.HINTS_DIR)
+  : path.join(PROJECT_ROOT, 'hints');
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -288,12 +294,33 @@ function main() {
   let totalEdges = 0;
   let totalWarps = 0;
   let totalVoids = 0;
+  let totalBent = 0;
+  const hintRows: HintReportRow[] = [];
   for (const { meta, rooms } of parsed) {
     if (rooms.length === 0) continue;
-    const layout = computeLayout(meta, rooms, vnumToArea);
+    // Areas with hints are laid out TWICE and the better run wins. Hints are a human's
+    // guess about a graph no algorithm reads perfectly; the build measures the guess
+    // instead of trusting it, so a stale hint file degrades to "slightly slower build".
+    const load = readHints(HINTS_DIR, meta.file, rooms);
+    const native = computeLayout(meta, rooms, vnumToArea);
+    const hinted = load && load.hints.size ? computeLayout(meta, rooms, vnumToArea, load.hints) : null;
+    const choice = pickLayout(native, hinted);
+    if (load) {
+      hintRows.push({
+        area: meta.file,
+        bentNative: choice.bentNative,
+        bentHinted: choice.bentHinted,
+        warpsNative: choice.warpsNative,
+        warpsHinted: choice.warpsHinted,
+        used: choice.used,
+        warnings: load.warnings,
+      });
+    }
+    const layout = choice.layout;
     totalRooms += rooms.length;
     totalEdges += layout.exits.length;
     totalWarps += layout.exits.filter((e) => e.style === 'warp').length;
+    totalBent += countBentEdges(layout);
     totalVoids += Object.values(layout.placed).filter((p) => p.isVoid).length;
     fs.writeFileSync(path.join(OUT_DIR, `area-${meta.file}.json`), JSON.stringify(layout));
   }
@@ -302,7 +329,21 @@ function main() {
   fs.writeFileSync(path.join(OUT_DIR, 'index.json'), JSON.stringify(index));
 
   console.log(`✓ Built ${parsed.length} areas, ${totalRooms} rooms, ${totalEdges} edges`);
-  console.log(`  warps: ${totalWarps}, void rooms: ${totalVoids}`);
+  console.log(`  warps: ${totalWarps}, bent edges: ${totalBent}, void rooms: ${totalVoids}`);
+
+  // Hints: one report for the whole run. The file is what regen-graph.sh forwards to
+  // Discord — a single message, never one per area.
+  if (hintRows.length) {
+    const helped = hintRows.filter((r) => r.used);
+    const saved = helped.reduce((sum, r) => sum + (r.bentNative - r.bentHinted), 0);
+    console.log(`  hints: ${helped.length} of ${hintRows.length} area(s) improved, ${saved} bent edges straightened`);
+    const summary = hintSummary(hintRows);
+    fs.writeFileSync(
+      path.join(OUT_DIR, 'hints-report.json'),
+      JSON.stringify({ areas: hintRows, summary }, null, 2),
+    );
+    if (summary) console.log(summary);
+  }
 }
 
 main();

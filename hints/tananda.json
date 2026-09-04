@@ -1,0 +1,9 @@
+{
+  "area": "tananda",
+  "source": "hand-corrected in the game client",
+  "updated": "2026-09-04",
+  "rooms": {
+    "1042": { "x": 15, "y": 3, "z": 0 },
+    "1044": { "x": 14, "y": 1.5, "z": 0 }
+  }
+}

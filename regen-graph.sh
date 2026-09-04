@@ -15,7 +15,9 @@ set -uo pipefail
 export PATH=/home/dreamland/.nodejs/current/bin:$PATH
 REPO=/home/dreamland/dreamland_mapper
 WEBROOT=/var/www/dreamland_web/static/maps/graph
-IDISCORD=/home/dreamland/runtime/bin/idiscord-code
+# Overridable so a developer can watch what the nightly build would say without a
+# webhook: IDISCORD=./local-discord.sh ./regen-graph.sh prints the payload instead.
+IDISCORD=${IDISCORD:-/home/dreamland/runtime/bin/idiscord-code}
 
 # Notify Discord + log, then exit non-zero. Message must stay quote-free (raw JSON).
 fail() {
@@ -40,3 +42,23 @@ fi
 
 rsync -a --delete public/data/ "$WEBROOT"/ || fail "rsync to web root failed"
 echo "$(date '+%F %T') deployed $count area graphs"
+
+# LAYOUT HINTS: one message for the whole run, and only when there is something to say.
+# hints-report.json carries a `summary` line when some hint file has gone stale (the plain
+# layout now beats it) or contains entries the build had to drop. Posting per area would
+# get the channel muted, and then the one line that mattered goes unread.
+REPORT=public/data/hints-report.json
+if [ -f "$REPORT" ] && [ -x "$IDISCORD" ]; then
+  payload=$(node -e '
+    const fs = require("fs");
+    const report = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));
+    if (!report.summary) process.exit(0);
+    process.stdout.write(JSON.stringify({
+      embeds: [{ color: 16764108, title: "Map layout hints need a look", description: report.summary.slice(0, 3800) }],
+      username: "Map Bot",
+    }));
+  ' "$REPORT") || payload=""
+  if [ -n "$payload" ]; then
+    printf '%s' "$payload" | "$IDISCORD" >/dev/null 2>&1 || true
+  fi
+fi
