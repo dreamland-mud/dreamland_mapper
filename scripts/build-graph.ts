@@ -60,11 +60,13 @@ function stripMarkers(s: string): string {
   let out = s;
   // {hh<vnum>text{x → text  (help anchors)
   out = out.replace(/\{hh\d+([^{]*)\{x/g, '$1');
-  // Clickable command links {hc<text>{hx / {hc<text>{x (the <text> may itself contain
-  // colour codes, e.g. {hc{cюг{x{x). Drop the {hc opener and {hx closer; the generic
-  // stripper below removes any inner colour codes and the trailing {x. Must run before
-  // that stripper, which would otherwise eat "{h" and leave the stray "c" (the "cюг" bug).
-  out = out.replace(/\{hc/g, '');
+  // Clickable links {hc<cmd> (command), {hs<path> (speedwalk), {hl<url> (web), closed by {hx
+  // or {x (the inner text may itself contain colour codes, e.g. {hc{cюг{x{x). Drop the
+  // opener and {hx closer; the generic stripper below removes any inner colour codes and
+  // the trailing {x. Must run before that stripper, which would otherwise eat "{h" and
+  // leave a stray letter: "c" (the "cюг" bug), "s" (every {hs speedwalk started with a
+  // step south), "l".
+  out = out.replace(/\{h[csl]/g, '');
   out = out.replace(/\{hx/g, '');
   // Preserve gender (flexer) switches {Sm}{Sf}{Sx so the web client can resolve them per
   // player sex instead of baking a single (male) form here. Shield them from the generic
