@@ -1,5 +1,6 @@
 #!/bin/bash
-# Regenerate the mudjs graph-map JSON from current area XML and deploy to the web root.
+# Regenerate the mudjs graph-map JSON from current area XML and deploy to the web root,
+# then rebuild the site's maps-index.json and zone articles from it.
 #
 # Runs daily via cron on the live server (crontab: 30 4 * * *). Builds into the repo's
 # public/data, then rsyncs to the web root ONLY on a complete build, so a parse crash
@@ -62,3 +63,11 @@ if [ -f "$REPORT" ] && [ -x "$IDISCORD" ]; then
     printf '%s' "$payload" | "$IDISCORD" >/dev/null 2>&1 || true
   fi
 fi
+
+# The site's zone list (maps-index.json: names, levels, speedwalks) and the zone
+# articles beside each map are built from these graphs and the help dump. Without
+# this they refresh only when dreamland_web deploys. Same calls as its drone step,
+# in the same order: zonehelp reports against the index maps writes.
+SITE=/var/www/dreamland_web/site.js
+/usr/bin/node "$SITE/build-maps.js" "$REPO/public/data" || fail "build-maps.js failed -- maps-index.json left as it was"
+/usr/bin/node "$SITE/build-zonehelp.js" /tmp/helps.json /home/dreamland/dreamland_areas || fail "build-zonehelp.js failed -- zone articles left as they were"
